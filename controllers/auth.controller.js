@@ -79,8 +79,11 @@ async function login(req, res) {
     const role = mapUserTypeToRole(user.u_type);
 
     const now = new Date();
-    const expiresMs = durationToMs(process.env.JWT_EXPIRES_IN || "24h");
-    const expiresAt = new Date(now.getTime() + expiresMs);
+
+  // expire when day changes (next day 00:00:00.000) based on server time
+    const expiresAt = new Date(now);
+    expiresAt.setHours(24, 0, 0, 0);
+
 
     const tokenAccess = crypto.randomBytes(48).toString("base64url");
     const tokenId = crypto.randomUUID();

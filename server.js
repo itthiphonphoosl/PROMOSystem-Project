@@ -1,15 +1,13 @@
-// server.js
 require("dotenv").config({ quiet: true });
 const express = require("express");
 const cors = require("cors");
 const os = require("os");
 
+// Routes
 const authRoutes = require("./routes/auth.routes");
-const trayRoutes = require("./routes/tray.routes");
-const opScanRoutes = require("./routes/opScan.routes");
-const masterRoutes = require("./routes/master.routes");
+const userRoutes = require("./routes/user.routes");
 
-const { requireAuth, requireRole } = require("./middleware/auth.middleware");
+// DB
 const { getPool } = require("./config/db");
 
 const app = express();
@@ -19,19 +17,11 @@ app.use(express.json());
 
 app.get("/health", (req, res) => res.json({ ok: true, project: "PROMOS" }));
 
+// Auth (login/logout + whatever you already have under /api/auth)
 app.use("/api/auth", authRoutes);
 
-app.use("/api/master", masterRoutes);
-app.use("/api/trays", trayRoutes);
-app.use("/api/op-scans", opScanRoutes);
-
-app.get("/api/me", requireAuth, (req, res) => {
-  res.json({ user: req.user });
-});
-
-app.get("/api/supervisor", requireAuth, requireRole(["admin", "manager"]), (req, res) => {
-  res.json({ message: "Supervisor access granted", user: req.user });
-});
+// Users (current user + user list + user by id)
+app.use("/api", userRoutes);
 
 function getLanIp() {
   const nets = os.networkInterfaces();
@@ -46,7 +36,7 @@ function getLanIp() {
 const port = Number(process.env.PORT || 4030);
 const host = "0.0.0.0";
 
-// trigger DB connection at startup
+// Trigger DB connect at startup
 getPool();
 
 app.listen(port, host, () => {
