@@ -1,4 +1,10 @@
-const bcrypt = require('bcryptjs');
+/**
+ * controllers/auth.controller.js
+ * ✅ เวอร์ชันเต็มไฟล์ (ตามโครงเดิม)
+ * ✅ ใส่คอมเมนต์กำกับว่า "เพิ่มอะไร/ตรงไหน" แล้ว
+ */
+
+const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 
 const { sql, getPool } = require("../config/db");
@@ -25,6 +31,19 @@ function durationToMs(text) {
   return 24 * 60 * 60 * 1000;
 }
 
+/**
+ * ✅ [เพิ่มใหม่] normalize client type header (legacy/framework -> device type)
+ * - REACT  -> PC
+ * - FLUTTER-> HH
+ * - also accept new values directly: PC / HH
+ */
+function normalizeClientType(raw) {
+  const v = String(raw || "").trim().toUpperCase();
+  if (v === "REACT" || v === "PC") return "PC";
+  if (v === "FLUTTER" || v === "HH") return "HH";
+  return "UNKNOWN";
+}
+
 async function login(req, res) {
   const username = String(req.body.username || "").trim();
   const password = String(req.body.password || "").trim();
@@ -32,8 +51,11 @@ async function login(req, res) {
   const clientTypeRaw =
     req.get("x-client-type") || req.headers["x-client-type"] || "UNKNOWN";
 
-  const clientType = String(clientTypeRaw).trim().toUpperCase();
-  const safeClientType = ["REACT", "FLUTTER"].includes(clientType) ? clientType : "UNKNOWN";
+  /**
+   * ✅ [แก้/เพิ่ม] store/send เป็น: PC | HH | UNKNOWN
+   * เดิมเช็ค ["REACT","FLUTTER"] ตอนนี้เปลี่ยนเป็น normalizeClientType()
+   */
+  const safeClientType = normalizeClientType(clientTypeRaw);
 
   if (!username || !password) {
     return res.status(400).json({ message: "กรุณากรอก username และ password" });
@@ -80,13 +102,17 @@ async function login(req, res) {
 
     const now = new Date();
 
-  // expire when day changes (next day 00:00:00.000) based on server time
+    // expire when day changes (next day 00:00:00.000) based on server time
     const expiresAt = new Date(now);
     expiresAt.setHours(24, 0, 0, 0);
 
-
     const tokenAccess = crypto.randomBytes(48).toString("base64url");
-    const tokenId = crypto.randomUUID();
+
+    /**
+     * ✅ [แก้] tokenId ให้ใช้ a_id (จะ set หลังจาก gen a_id สำเร็จ)
+     * เดิม: const tokenId = crypto.randomUUID();
+     */
+    let tokenId = null;
 
     const tx = new sql.Transaction(pool);
     await tx.begin();
@@ -117,6 +143,11 @@ async function login(req, res) {
       const suffix = String(running).padStart(4, "0");
       const a_id = `${prefix}${suffix}`;
 
+      /**
+       * ✅ [เพิ่ม] ให้ tokenId = a_id ตามที่ต้องการ
+       */
+      tokenId = a_id;
+
       const exists = await new sql.Request(tx)
         .input("a_token", sql.NVarChar(255), tokenAccess)
         .query(`SELECT TOP 1 a_id FROM access WHERE a_token = @a_token`);
@@ -132,6 +163,9 @@ async function login(req, res) {
         .input("a_token", sql.NVarChar(255), tokenAccess)
         .input("a_created", sql.DateTime2(3), now)
         .input("a_expired", sql.DateTime2(3), expiresAt)
+        /**
+         * ✅ [แก้/เพิ่ม] เก็บ a_client_type เป็น PC | HH | UNKNOWN
+         */
         .input("a_client_type", sql.VarChar(20), safeClientType)
         .query(`
           INSERT INTO access (a_id, u_id, a_token, a_created, a_expired, a_client_type)
@@ -150,9 +184,12 @@ async function login(req, res) {
 
     return res.json({
       tokenAccess,
+      /**
+       * ✅ [แก้/เพิ่ม] ส่ง clientType เป็น PC | HH | UNKNOWN
+       */
       clientType: safeClientType,
       tokenExpiresAt: expiresAt.toISOString(),
-      tokenId,
+      tokenId, // ✅ ตอนนี้ = a_id ในตาราง access แล้ว
       userInfo: {
         u_id: String(user.u_id),
         u_name: user.u_name,
@@ -293,12 +330,52 @@ async function createUser(req, res) {
   }
 }
 
+// ✅ [แก้ไข] getAllUsers: รองรับ query alias
+// - type   -> u_type   (op/ad/ma)
+// - active -> u_active (0/1)
+// และยังรองรับ u_type/u_active แบบเดิมด้วย
 async function getAllUsers(req, res) {
+  const q = String(req.query.q || "").trim(); // search u_username/u_name
+
+  // ✅ [เพิ่ม] alias: type/active (fallback ไปหา u_type/u_active)
+  const type = String(req.query.type || req.query.u_type || "").trim(); // op/ad/ma
+
+  const activeRaw = req.query.active !== undefined ? req.query.active : req.query.u_active;
+  const active = activeRaw === undefined ? null : Number(activeRaw); // 0/1
+
+  // ✅ [เพิ่ม] validate type ถ้ามีส่งมา
+  if (type && !["op", "ad", "ma"].includes(type)) {
+    return res.status(400).json({ message: "type ต้องเป็น op, ad, ma เท่านั้น" });
+  }
+
+  // ✅ [เพิ่ม] validate active ถ้ามีส่งมา
+  if (active !== null && ![0, 1].includes(active)) {
+    return res.status(400).json({ message: "active ต้องเป็น 0 หรือ 1 เท่านั้น" });
+  }
+
   try {
     const pool = await getPool();
     if (!pool) return res.status(500).json({ message: "เชื่อมต่อฐานข้อมูลไม่สำเร็จ" });
 
-    const result = await pool.request().query(`
+    let where = "WHERE 1=1";
+    const r = pool.request();
+
+    if (q) {
+      where += " AND (u_username LIKE @q OR u_name LIKE @q)";
+      r.input("q", sql.NVarChar(255), `%${q}%`);
+    }
+
+    if (type) {
+      where += " AND u_type = @u_type";
+      r.input("u_type", sql.VarChar(2), type);
+    }
+
+    if (active === 0 || active === 1) {
+      where += " AND u_active = @u_active";
+      r.input("u_active", sql.Int, active);
+    }
+
+    const result = await r.query(`
       SELECT
         u_id,
         u_username,
@@ -308,13 +385,11 @@ async function getAllUsers(req, res) {
         u_created_ts,
         u_updated_ts
       FROM [user]
+      ${where}
       ORDER BY u_id ASC
     `);
 
-    return res.json({
-      message: "success",
-      users: result.recordset,
-    });
+    return res.json({ message: "success", users: result.recordset });
   } catch (err) {
     console.error("GET ALL USERS ERROR:", err);
     return res.status(500).json({ message: "เกิดข้อผิดพลาดของเซิร์ฟเวอร์" });
@@ -359,6 +434,5 @@ async function getUsersByType(req, res) {
     return res.status(500).json({ message: "เกิดข้อผิดพลาดของเซิร์ฟเวอร์" });
   }
 }
-
 
 module.exports = { login, logout, createUser, getAllUsers, getUsersByType };

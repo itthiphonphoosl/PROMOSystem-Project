@@ -8,6 +8,11 @@ const { createUser } = require("../controllers/auth.controller");
 
 // Reuse existing controller (so behavior stays the same)
 const { getAllUsers } = require("../controllers/auth.controller");
+
+// ✅ [เพิ่มใหม่] import controller สำหรับอัปเดต user (แก้ได้ 5 ฟิลด์)
+const { updateUser } = require("../controllers/user.controller");
+
+// ✅ Create user (admin/manager only)
 router.post("/users", requireAuth, requireRole(["admin", "manager"]), createUser);
 
 // ✅ Current user (op/ad/ma)
@@ -61,5 +66,13 @@ router.get(
     }
   }
 );
+
+/**
+ * UPDATE user (admin/manager only)
+ * PUT /api/users/:id
+ * body ส่งได้: u_name, u_username, u_password, u_type, u_active
+ * - op ไม่มีสิทธิ์ เพราะ requireRole(["admin","manager"]) กันไว้
+ */
+router.put("/users/:id", requireAuth, requireRole(["admin", "manager"]), updateUser);
 
 module.exports = router;

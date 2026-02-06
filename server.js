@@ -6,6 +6,8 @@ const os = require("os");
 // Routes
 const authRoutes = require("./routes/auth.routes");
 const userRoutes = require("./routes/user.routes");
+const stationRoutes = require("./routes/station.routes");
+const machineRoutes = require("./routes/machine.routes");
 
 // DB
 const { getPool } = require("./config/db");
@@ -22,6 +24,9 @@ app.use("/api/auth", authRoutes);
 
 // Users (current user + user list + user by id)
 app.use("/api", userRoutes);
+
+app.use("/api", stationRoutes);
+app.use("/api", machineRoutes);
 
 function getLanIp() {
   const nets = os.networkInterfaces();
