@@ -86,7 +86,6 @@ async function createMachine(req, res) {
     await tx.begin();
 
     try {
-      // ล็อกเพื่อกันชนกันตอน gen id
       const last = await new sql.Request(tx).query(`
         SELECT TOP 1 MC_id
         FROM [dbo].[machine] WITH (UPDLOCK, HOLDLOCK)
@@ -114,6 +113,11 @@ async function createMachine(req, res) {
 
       await tx.commit();
 
+      // ✅ LOG (จำเป็นพอ)
+      console.log(
+        `[MACHINE][CREATE] u_name=${req.user?.u_name ?? "?"} role=${req.user?.role ?? "?"} mc_id=${mc_id} created=${JSON.stringify({ mc_name, mc_active })}`
+      );
+
       return res.status(201).json({
         message: "created",
         machine: { mc_id, mc_name, mc_active },
@@ -135,8 +139,10 @@ async function updateMachine(req, res) {
   const mc_id = String(req.params.id || "").trim();
   if (!isValidMachineId(mc_id)) return res.status(400).json({ message: "Invalid machine id" });
 
-  // กันคนส่ง mc_id มาแก้ใน body (ไม่ให้เปลี่ยน PK ผ่าน API)
-  if (Object.prototype.hasOwnProperty.call(req.body, "mc_id") || Object.prototype.hasOwnProperty.call(req.body, "MC_id")) {
+  if (
+    Object.prototype.hasOwnProperty.call(req.body, "mc_id") ||
+    Object.prototype.hasOwnProperty.call(req.body, "MC_id")
+  ) {
     return res.status(400).json({ message: "ห้ามส่ง mc_id มาแก้ไข (แก้ได้เฉพาะ mc_name, mc_active)" });
   }
 
@@ -202,6 +208,10 @@ async function updateMachine(req, res) {
         FROM [dbo].[machine]
         WHERE MC_id = @id
       `);
+
+    console.log(
+      `[MACHINE][UPDATE] u_name=${req.user?.u_name ?? "?"} role=${req.user?.role ?? "?"} mc_id=${mc_id} updated=${JSON.stringify(changed)}`
+    );
 
     return res.json({
       message: "success",
