@@ -1,4 +1,5 @@
 require("dotenv").config({ quiet: true });
+
 const express = require("express");
 const cors = require("cors");
 const os = require("os");
@@ -8,6 +9,8 @@ const authRoutes = require("./routes/auth.routes");
 const userRoutes = require("./routes/user.routes");
 const stationRoutes = require("./routes/station.routes");
 const machineRoutes = require("./routes/machine.routes");
+const transferRoutes = require("./routes/transfers.routes");
+const tkDocRoutes = require("./routes/tk_document.routes");
 
 // DB
 const { getPool } = require("./config/db");
@@ -19,15 +22,17 @@ app.use(express.json());
 
 app.get("/health", (req, res) => res.json({ ok: true, project: "PROMOS" }));
 
-// Auth (login/logout + whatever you already have under /api/auth)
+// Auth
 app.use("/api/auth", authRoutes);
 
-// Users (current user + user list + user by id)
+// Base /api
 app.use("/api", userRoutes);
-
 app.use("/api", stationRoutes);
 app.use("/api", machineRoutes);
 
+// Feature routes
+app.use("/api/transfers", transferRoutes);
+app.use("/api", tkDocRoutes);
 function getLanIp() {
   const nets = os.networkInterfaces();
   for (const name of Object.keys(nets)) {
