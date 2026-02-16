@@ -28,6 +28,87 @@ async function validateStationActive(pool, op_sta_id) {
   return { ok: true, row };
 }
 
+async function listMachinesMyStation(req, res) {
+  try {
+    const pool = await getPool();
+    if (!pool) return res.status(500).json({ message: "Database connection failed" });
+
+    const op_sta_id = req.user?.op_sta_id ? String(req.user.op_sta_id).trim() : "";
+
+    // 1) token ไม่มี station
+    if (!op_sta_id) {
+      return res.status(400).json({
+        message: "Missing station in token (a_op_sta_id is null). Please login again with op_sta_id.",
+        hint: "POST /api/auth/login (HH operator) must write access.a_op_sta_id",
+      });
+    }
+
+    // 2) เช็ค station realtime
+    const staR = await pool
+      .request()
+      .input("id", sql.VarChar(20), op_sta_id)
+      .query(`
+        SELECT TOP 1
+          op_sta_id,
+          op_sta_name,
+          CAST(op_sta_active AS INT) AS op_sta_active
+        FROM dbo.op_station
+        WHERE op_sta_id = @id
+      `);
+
+    const sta = staR.recordset?.[0];
+
+    if (!sta) {
+      return res.status(400).json({
+        message: `Station not found: ${op_sta_id}`,
+        op_sta_id,
+        hint: "Check dbo.op_station op_sta_id",
+      });
+    }
+
+    if (Number(sta.op_sta_active) !== 1) {
+      return res.status(403).json({
+        message: `Station is inactive: ${sta.op_sta_id} (${sta.op_sta_name})`,
+        station: {
+          op_sta_id: sta.op_sta_id,
+          op_sta_name: sta.op_sta_name,
+          op_sta_active: Number(sta.op_sta_active),
+        },
+        hint: "Set dbo.op_station.op_sta_active = 1",
+      });
+    }
+
+    // 3) ดึง machine ใน station นี้ (แนะนำให้เอาเฉพาะ active ไปให้ HH เลือก)
+    const r = await pool
+      .request()
+      .input("op_sta_id", sql.VarChar(20), sta.op_sta_id)
+      .query(`
+        SELECT
+          m.MC_id   AS mc_id,
+          m.MC_name AS mc_name,
+          CAST(m.MC_active AS INT) AS mc_active,
+          m.op_sta_id,
+          s.op_sta_name
+        FROM dbo.machine m
+        LEFT JOIN dbo.op_station s ON s.op_sta_id = m.op_sta_id
+        WHERE m.op_sta_id = @op_sta_id
+          AND CAST(m.MC_active AS INT) = 1
+        ORDER BY m.MC_id ASC
+      `);
+
+    return res.json({
+      station: {
+        op_sta_id: sta.op_sta_id,
+        op_sta_name: sta.op_sta_name,
+      },
+      total: r.recordset?.length || 0,
+      machines: r.recordset || [],
+    });
+  } catch (err) {
+    console.error("MY STATION MACHINES ERROR:", err);
+    return res.status(500).json({ message: "Server error", error: err.message });
+  }
+}
 // GET /api/machines  (admin only)
 async function listMachines(req, res) {
   try {
@@ -330,4 +411,5 @@ module.exports = {
   getMachineById,
   createMachine,
   updateMachine,
+  listMachinesMyStation
 };

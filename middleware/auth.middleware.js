@@ -18,7 +18,6 @@ function normalizeClientType(raw) {
   return "UNKNOWN";
 }
 
-// checking token in DB (access.a_token) + not expired (a_expired)
 async function requireAuth(req, res, next) {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : null;
@@ -43,42 +42,29 @@ async function requireAuth(req, res, next) {
           a.a_client_type,
           a.a_op_sta_id,
 
-          s.op_sta_code,
-          s.op_sta_name,
-          s.op_sta_active,
-
           u.u_username,
           u.u_name,
           u.u_type,
-          u.u_active
+          u.u_active,
+
+          s.op_sta_name,
+          CAST(s.op_sta_active AS INT) AS op_sta_active
         FROM access a
         JOIN [user] u ON u.u_id = a.u_id
-        LEFT JOIN dbo.op_station s ON s.op_sta_id = a.a_op_sta_id
+        LEFT JOIN dbo.op_station s
+          ON s.op_sta_id = LTRIM(RTRIM(a.a_op_sta_id))
         WHERE a.a_token = @a_token
           AND a.a_expired > @now
         ORDER BY a.a_created DESC
       `);
 
     const row = result.recordset?.[0];
-
     if (!row) {
       return res.status(401).json({ message: "Token expired or invalid, please login again" });
     }
 
     if (row.u_active !== 1) {
       return res.status(403).json({ message: "User is inactive" });
-    }
-
-    // ถ้า token มี station -> ต้องมีใน op_station และ active=1
-    const tokenOpStaId = row.a_op_sta_id ? String(row.a_op_sta_id).trim() : null;
-    if (tokenOpStaId) {
-      // ถ้า LEFT JOIN ไม่เจอ station จะได้ค่า null
-      if (!row.op_sta_code && !row.op_sta_name) {
-        return res.status(403).json({ message: "Station in token not found" });
-      }
-      if (row.op_sta_active !== 1) {
-        return res.status(403).json({ message: "Station is inactive" });
-      }
     }
 
     const requestClientType = normalizeClientType(
@@ -97,15 +83,10 @@ async function requireAuth(req, res, next) {
 
       tokenExpiresAt: row.a_expired,
 
-      // ✅ station remembered by token
-      op_sta_id: tokenOpStaId,
-      station: tokenOpStaId
-        ? {
-            op_sta_id: tokenOpStaId,
-            op_sta_code: row.op_sta_code,
-            op_sta_name: row.op_sta_name,
-          }
-        : null,
+      // ✅ station from token (access)
+      op_sta_id: row.a_op_sta_id ? String(row.a_op_sta_id).trim() : null,
+      op_sta_name: row.op_sta_name || null,
+      op_sta_active: row.op_sta_active === null || row.op_sta_active === undefined ? null : Number(row.op_sta_active),
     };
 
     next();
