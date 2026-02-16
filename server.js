@@ -33,6 +33,8 @@ app.use("/api", machineRoutes);
 // Feature routes
 app.use("/api/transfers", transferRoutes);
 app.use("/api", tkDocRoutes);
+app.use("/api", require("./routes/op_scan.routes"));
+
 function getLanIp() {
   const nets = os.networkInterfaces();
   for (const name of Object.keys(nets)) {

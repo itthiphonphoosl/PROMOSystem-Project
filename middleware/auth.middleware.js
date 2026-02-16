@@ -9,10 +9,7 @@ function mapUserTypeToRole(u_type) {
 }
 
 /**
- * ✅ [แก้/รวม] normalize x-client-type ให้เหลือแค่ PC / HH
- * - PC = React Web
- * - HH = Flutter Handheld
- * - รองรับค่าเก่า: REACT/FLUTTER -> PC/HH
+ * normalize x-client-type -> PC / HH / UNKNOWN
  */
 function normalizeClientType(raw) {
   const v = String(raw || "").trim().toUpperCase();
@@ -44,18 +41,25 @@ async function requireAuth(req, res, next) {
           a.a_created,
           a.a_expired,
           a.a_client_type,
+          a.a_op_sta_id,
+
+          s.op_sta_code,
+          s.op_sta_name,
+          s.op_sta_active,
+
           u.u_username,
           u.u_name,
           u.u_type,
           u.u_active
         FROM access a
         JOIN [user] u ON u.u_id = a.u_id
+        LEFT JOIN dbo.op_station s ON s.op_sta_id = a.a_op_sta_id
         WHERE a.a_token = @a_token
           AND a.a_expired > @now
         ORDER BY a.a_created DESC
       `);
 
-    const row = result.recordset[0];
+    const row = result.recordset?.[0];
 
     if (!row) {
       return res.status(401).json({ message: "Token expired or invalid, please login again" });
@@ -65,7 +69,18 @@ async function requireAuth(req, res, next) {
       return res.status(403).json({ message: "User is inactive" });
     }
 
-    // ✅ [เพิ่ม] เก็บ client type จาก request header (เอาไว้เช็ค/ใช้งานต่อ)
+    // ถ้า token มี station -> ต้องมีใน op_station และ active=1
+    const tokenOpStaId = row.a_op_sta_id ? String(row.a_op_sta_id).trim() : null;
+    if (tokenOpStaId) {
+      // ถ้า LEFT JOIN ไม่เจอ station จะได้ค่า null
+      if (!row.op_sta_code && !row.op_sta_name) {
+        return res.status(403).json({ message: "Station in token not found" });
+      }
+      if (row.op_sta_active !== 1) {
+        return res.status(403).json({ message: "Station is inactive" });
+      }
+    }
+
     const requestClientType = normalizeClientType(
       req.get("x-client-type") || req.headers["x-client-type"]
     );
@@ -77,13 +92,20 @@ async function requireAuth(req, res, next) {
       u_type: row.u_type,
       role: mapUserTypeToRole(row.u_type),
 
-      // ✅ [แก้] normalize type ที่เก็บใน token ด้วย (กันข้อมูลเก่า REACT/FLUTTER)
       clientType: normalizeClientType(row.a_client_type),
-
-      // ✅ [เพิ่ม] type ที่ส่งมากับ request นี้
       requestClientType,
 
       tokenExpiresAt: row.a_expired,
+
+      // ✅ station remembered by token
+      op_sta_id: tokenOpStaId,
+      station: tokenOpStaId
+        ? {
+            op_sta_id: tokenOpStaId,
+            op_sta_code: row.op_sta_code,
+            op_sta_name: row.op_sta_name,
+          }
+        : null,
     };
 
     next();
@@ -106,12 +128,6 @@ function requireRole(allowedRoles = []) {
   };
 }
 
-/**
- * ✅ [แก้] requireClientType ไม่พึ่ง req.user แล้ว
- * - อ่าน x-client-type จาก header โดยตรง -> กันกรณี route ไม่ได้เรียก requireAuth ก่อน
- * - default รับได้ทั้ง PC และ HH (ตามที่ฉันสั่ง)
- * - ถ้ามี req.user (ผ่าน requireAuth แล้ว) จะเช็ค tokenType mismatch ให้ด้วย
- */
 function requireClientType(allowed = ["PC", "HH"]) {
   return (req, res, next) => {
     const reqType = normalizeClientType(req.get("x-client-type") || req.headers["x-client-type"]);
@@ -123,7 +139,6 @@ function requireClientType(allowed = ["PC", "HH"]) {
       return res.status(403).json({ message: "Client type is not allowed" });
     }
 
-    // ✅ ถ้าใช้ร่วมกับ requireAuth: กัน token ข้าม device/type
     const tokenType = req.user?.clientType ? normalizeClientType(req.user.clientType) : null;
     if (tokenType && tokenType !== "UNKNOWN" && tokenType !== reqType) {
       return res.status(403).json({ message: "Token client type mismatch" });

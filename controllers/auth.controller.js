@@ -1,9 +1,3 @@
-/**
- * controllers/auth.controller.js
- * ✅ เวอร์ชันเต็มไฟล์ (ตามโครงเดิม)
- * ✅ ใส่คอมเมนต์กำกับว่า "เพิ่มอะไร/ตรงไหน" แล้ว
- */
-
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 
@@ -31,12 +25,7 @@ function durationToMs(text) {
   return 24 * 60 * 60 * 1000;
 }
 
-/**
- * ✅ [เพิ่มใหม่] normalize client type header (legacy/framework -> device type)
- * - REACT  -> PC
- * - FLUTTER-> HH
- * - also accept new values directly: PC / HH
- */
+
 function normalizeClientType(raw) {
   const v = String(raw || "").trim().toUpperCase();
   if (v === "REACT" || v === "PC") return "PC";
@@ -46,25 +35,23 @@ function normalizeClientType(raw) {
 
 async function login(req, res) {
   const username = String(req.body.username || "").trim();
-  const password = String(req.body.password || "").trim();
+  const password = String(req.body.password || "").trim(); // admin/PC uses this
+  const op_sta_id = String(req.body.op_sta_id || "").trim(); // operator/HH uses this
 
   const clientTypeRaw =
     req.get("x-client-type") || req.headers["x-client-type"] || "UNKNOWN";
 
-  /**
-   * ✅ [แก้/เพิ่ม] store/send เป็น: PC | HH | UNKNOWN
-   * เดิมเช็ค ["REACT","FLUTTER"] ตอนนี้เปลี่ยนเป็น normalizeClientType()
-   */
   const safeClientType = normalizeClientType(clientTypeRaw);
 
-  if (!username || !password) {
-    return res.status(400).json({ message: "กรุณากรอก username และ password" });
+  if (!username) {
+    return res.status(400).json({ message: "กรุณากรอก username" });
   }
 
   try {
     const pool = await getPool();
     if (!pool) return res.status(500).json({ message: "เชื่อมต่อฐานข้อมูลไม่สำเร็จ" });
 
+    // 1) find user
     const result = await pool
       .request()
       .input("username", sql.VarChar(50), username)
@@ -75,43 +62,72 @@ async function login(req, res) {
         WHERE u_username = @username
       `);
 
-    const user = result.recordset[0];
-
-    if (!user) {
-      return res.status(404).json({ message: "ไม่มีผู้ใช้นี้อยู่ในระบบ" });
-    }
-
-    if (user.u_active !== 1) {
-      return res.status(403).json({ message: "บัญชีผู้ใช้ถูกปิดใช้งาน" });
-    }
-
-    const mode = String(process.env.PASSWORD_MODE || "bcrypt").toLowerCase();
-    let passOk = false;
-
-    if (mode === "plain") {
-      passOk = password === String(user.u_password || "");
-    } else {
-      passOk = await bcrypt.compare(password, String(user.u_password || ""));
-    }
-
-    if (!passOk) {
-      return res.status(401).json({ message: "รหัสผ่านไม่ถูกต้อง" });
-    }
+    const user = result.recordset?.[0];
+    if (!user) return res.status(404).json({ message: "ไม่มีผู้ใช้นี้อยู่ในระบบ" });
+    if (user.u_active !== 1) return res.status(403).json({ message: "บัญชีผู้ใช้ถูกปิดใช้งาน" });
 
     const role = mapUserTypeToRole(user.u_type);
 
-    const now = new Date();
+    // 2) Decide login mode
+    const isOperatorHH = safeClientType === "HH" && user.u_type === "op";
 
-    // expire when day changes (next day 00:00:00.000) based on server time
+    // 3) Validate credentials
+    if (!isOperatorHH) {
+      // admin/manager/PC: must have password
+      if (!password) {
+        return res.status(400).json({ message: "กรุณากรอก password" });
+      }
+
+      const mode = String(process.env.PASSWORD_MODE || "bcrypt").toLowerCase();
+      let passOk = false;
+
+      if (mode === "plain") {
+        passOk = password === String(user.u_password || "");
+      } else {
+        passOk = await bcrypt.compare(password, String(user.u_password || ""));
+      }
+
+      if (!passOk) {
+        return res.status(401).json({ message: "รหัสผ่านไม่ถูกต้อง" });
+      }
+    } else {
+      // operator/HH: must choose station (no password required)
+      if (!op_sta_id) {
+        return res.status(400).json({ message: "กรุณาเลือก station (op_sta_id)" });
+      }
+    }
+
+    // 4) If operator/HH -> lookup station name + active
+    let op_sta_name = null;
+
+    if (isOperatorHH) {
+      const staR = await pool
+        .request()
+        .input("op_sta_id", sql.VarChar(20), op_sta_id)
+        .query(`
+          SELECT TOP 1
+            op_sta_id,
+            op_sta_name,
+            CAST(op_sta_active AS INT) AS op_sta_active
+          FROM dbo.op_station
+          WHERE op_sta_id = @op_sta_id
+        `);
+
+      const sta = staR.recordset?.[0];
+      if (!sta) return res.status(400).json({ message: "ไม่พบ station" });
+      if (Number(sta.op_sta_active) !== 1) {
+        return res.status(400).json({ message: "station ถูกปิดใช้งาน" });
+      }
+
+      op_sta_name = sta.op_sta_name || null;
+    }
+
+    // 5) Token
+    const now = new Date();
     const expiresAt = new Date(now);
     expiresAt.setHours(24, 0, 0, 0);
 
     const tokenAccess = crypto.randomBytes(48).toString("base64url");
-
-    /**
-     * ✅ [แก้] tokenId ให้ใช้ a_id (จะ set หลังจาก gen a_id สำเร็จ)
-     * เดิม: const tokenId = crypto.randomUUID();
-     */
     let tokenId = null;
 
     const tx = new sql.Transaction(pool);
@@ -133,8 +149,8 @@ async function login(req, res) {
         `);
 
       let running = 1;
-      if (last.recordset.length > 0) {
-        const lastId = String(last.recordset[0].a_id);
+      if (last.recordset?.length > 0) {
+        const lastId = String(last.recordset[0].a_id || "");
         const tail = lastId.slice(prefix.length);
         const n = parseInt(tail, 10);
         if (!Number.isNaN(n)) running = n + 1;
@@ -142,34 +158,29 @@ async function login(req, res) {
 
       const suffix = String(running).padStart(4, "0");
       const a_id = `${prefix}${suffix}`;
-
-      /**
-       * ✅ [เพิ่ม] ให้ tokenId = a_id ตามที่ต้องการ
-       */
       tokenId = a_id;
 
       const exists = await new sql.Request(tx)
         .input("a_token", sql.NVarChar(255), tokenAccess)
         .query(`SELECT TOP 1 a_id FROM access WHERE a_token = @a_token`);
 
-      if (exists.recordset.length > 0) {
+      if (exists.recordset?.length > 0) {
         await tx.rollback();
         return res.status(500).json({ message: "ระบบสร้าง token ซ้ำ กรุณาลองใหม่อีกครั้ง" });
       }
 
+      // ✅ store a_op_sta_id (NULL for non-operator or non-HH)
       await new sql.Request(tx)
         .input("a_id", sql.VarChar(20), a_id)
         .input("u_id", sql.VarChar(20), String(user.u_id))
         .input("a_token", sql.NVarChar(255), tokenAccess)
         .input("a_created", sql.DateTime2(3), now)
         .input("a_expired", sql.DateTime2(3), expiresAt)
-        /**
-         * ✅ [แก้/เพิ่ม] เก็บ a_client_type เป็น PC | HH | UNKNOWN
-         */
         .input("a_client_type", sql.VarChar(20), safeClientType)
+        .input("a_op_sta_id", sql.VarChar(20), isOperatorHH ? op_sta_id : null)
         .query(`
-          INSERT INTO access (a_id, u_id, a_token, a_created, a_expired, a_client_type)
-          VALUES (@a_id, @u_id, @a_token, @a_created, @a_expired, @a_client_type)
+          INSERT INTO access (a_id, u_id, a_token, a_created, a_expired, a_client_type, a_op_sta_id)
+          VALUES (@a_id, @u_id, @a_token, @a_created, @a_expired, @a_client_type, @a_op_sta_id)
         `);
 
       await tx.commit();
@@ -179,22 +190,22 @@ async function login(req, res) {
     }
 
     console.log(
-      `[LOGIN] u_id=${user.u_id} u_name=${user.u_name} u_username=${user.u_username} clientType=${safeClientType} tokenId=${tokenId} expiresAt=${expiresAt.toISOString()}`
+      `[LOGIN] u_id=${user.u_id} u_name=${user.u_name} u_username=${user.u_username} clientType=${safeClientType} tokenId=${tokenId} expiresAt=${expiresAt.toISOString()} op_sta_id=${isOperatorHH ? op_sta_id : "-"}`
     );
 
+    // ✅ response: add op_sta_name
     return res.json({
       tokenAccess,
-      /**
-       * ✅ [แก้/เพิ่ม] ส่ง clientType เป็น PC | HH | UNKNOWN
-       */
       clientType: safeClientType,
       tokenExpiresAt: expiresAt.toISOString(),
-      tokenId, // ✅ ตอนนี้ = a_id ในตาราง access แล้ว
+      tokenId,
       userInfo: {
         u_id: String(user.u_id),
         u_name: user.u_name,
         u_type: user.u_type,
         role,
+        op_sta_id: isOperatorHH ? op_sta_id : null,
+        op_sta_name: isOperatorHH ? op_sta_name : null,
       },
     });
   } catch (err) {
@@ -202,7 +213,6 @@ async function login(req, res) {
     return res.status(500).json({ message: "เกิดข้อผิดพลาดของเซิร์ฟเวอร์" });
   }
 }
-
 // POST /api/auth/logout
 async function logout(req, res) {
   const auth = req.headers.authorization || "";
