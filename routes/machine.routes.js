@@ -10,7 +10,6 @@ const {
   updateMachine,
 } = require("../controllers/machine.controller");
 
-// ✅ ทุกอัน “admin เท่านั้น”
 router.get("/machines", requireAuth, requireRole(["admin"]), listMachines);
 router.get("/machines/:id", requireAuth, requireRole(["admin"]), getMachineById);
 router.post("/machines", requireAuth, requireRole(["admin"]), createMachine);
