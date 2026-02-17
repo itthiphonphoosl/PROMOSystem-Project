@@ -288,65 +288,7 @@ exports.listTkDocs = async (req, res) => {
   }
 };
 
-// --- GET BY ID (PC + HH) ---
-exports.getTkDocById = async (req, res) => {
-  const actor = actorOf(req);
-  const id = String(req.params.id || "").trim();
-  if (!id) return res.status(400).json({ message: "id is required" });
 
-  try {
-    const pool = await getPool();
-
-    // Fetch exactly the tray by tk_id
-    const r = await pool
-      .request()
-      .input("id", sql.VarChar(20), id)
-      .query(`
-        SELECT TOP 1
-          d.tk_id,
-          d.MC_id,
-          d.op_sta_id,
-          d.tk_parent_id,
-          d.u_id,
-          d.part_id,
-          p.part_no,
-          p.part_name,
-          d.lot_no,
-          d.tk_status,
-          d.tk_created_at_ts
-        FROM ${TKDETAIL_TABLE} d
-        LEFT JOIN dbo.part p ON p.part_id = d.part_id
-        WHERE d.tk_id = @id
-        ORDER BY d.tk_created_at_ts DESC;
-      `);
-
-    const row = r.recordset?.[0];
-    if (!row) return res.status(404).json({ message: "Not found", id });
-
-    // ✅ Top-level: only id + lot_no
-    return res.json({
-      actor,
-      id: row.tk_id,
-      lot_no: row.lot_no,
-      detail: {
-        tk_id: row.tk_id,
-        MC_id: row.MC_id,
-        op_sta_id: row.op_sta_id,
-        tk_parent_id: row.tk_parent_id,
-        u_id: row.u_id,
-        part_id: row.part_id,
-        part_no: row.part_no,
-        part_name: row.part_name,
-        lot_no: row.lot_no,
-        tk_status: row.tk_status,
-        tk_created_at_ts: row.tk_created_at_ts,
-      },
-    });
-  } catch (err) {
-    console.error("[TKDOC_GET][ERROR]", err);
-    return res.status(500).json({ message: "Get failed", error: err.message });
-  }
-};
 
 exports.getTkDocById = async (req, res) => {
   const actor = actorOf(req);
