@@ -59,7 +59,7 @@ async function genTransferId(tx, docDate) {
   let running = 1;
   if (r.recordset.length > 0) {
     const last = String(r.recordset[0].tk_transfer_id || "");
-    const tail = last.slice(prefix.length); // ####
+    const tail = last.slice(prefix.length);
     const n = parseInt(tail, 10);
     if (!Number.isNaN(n)) running = n + 1;
   }
@@ -165,7 +165,7 @@ exports.splitTransfer = async (req, res) => {
         .input("tk_current_qty", sql.Int, split_qty)
         .input("tk_status", sql.Int, 0)
         .input("part_id", sql.Int, Number(fromRow.part_id))
-.input("lot_no", sql.NVarChar(300), String(fromRow.lot_no))        .input("tk_created_at_ts", sql.DateTime2(3), now)
+        input("lot_no", sql.NVarChar(300), String(fromRow.lot_no))        .input("tk_created_at_ts", sql.DateTime2(3), now)
         .query(`
           INSERT INTO ${TKDETAIL_TABLE}
             (tk_id, u_id, created_op_sta_id, tk_parent_id, current_op_sta_id,

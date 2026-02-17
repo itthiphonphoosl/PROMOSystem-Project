@@ -20,8 +20,8 @@ router.get("/machines", requireAuth, requireRole(["admin"]), listMachines);
 router.get(
   "/machines/in-station",
   requireAuth,
-  requireRole(["operator"]),
-  requireClientType(["HH"]),
+  requireRole(["admin","operator"]),
+  requireClientType(["HH","PC"]),
   listMachinesMyStation
 );
 router.get("/machines/:id", requireAuth, requireRole(["admin"]), getMachineById);
