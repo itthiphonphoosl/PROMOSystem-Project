@@ -69,11 +69,9 @@ exports.createTkDoc = async (req, res) => {
     const pool = await getPool();
 
     const part_no = String(req.body.part_no || "").trim();
-    const MC_id = String(req.body.MC_id || "").trim();
 
     if (!actor.u_id) return res.status(401).json({ message: "Unauthorized", actor });
     if (!part_no) return res.status(400).json({ message: "part_no is required", actor });
-    if (!MC_id) return res.status(400).json({ message: "MC_id is required", actor });
 
     // lookup part
     const partResult = await pool
@@ -94,57 +92,6 @@ exports.createTkDoc = async (req, res) => {
       });
     }
 
-    // lookup machine -> op_sta_id (+ MC_name)
-    const mcResult = await pool
-      .request()
-      .input("MC_id", sql.VarChar(10), MC_id)
-      .query(`
-        SELECT TOP 1 MC_id, op_sta_id, MC_active, MC_name
-        FROM dbo.machine
-        WHERE MC_id = @MC_id
-      `);
-
-    const mcRow = mcResult.recordset?.[0];
-    if (!mcRow) {
-      return res.status(400).json({
-        message: "Create failed: MC_id not found",
-        actor,
-        error: `MC_id not found: ${MC_id}`,
-      });
-    }
-
-    const MC_name = mcRow.MC_name ? String(mcRow.MC_name).trim() : null;
-
-    const op_sta_id = mcRow.op_sta_id ? String(mcRow.op_sta_id).trim() : "";
-    if (!op_sta_id) {
-      return res.status(400).json({
-        message: "Create failed: machine has no op_sta_id",
-        actor,
-        error: `machine ${MC_id} has op_sta_id = NULL`,
-      });
-    }
-
-    // ✅ validate station exists + get op_sta_name
-    const staCheck = await pool
-      .request()
-      .input("id", sql.VarChar(20), op_sta_id)
-      .query(`
-        SELECT TOP 1 op_sta_id, op_sta_name
-        FROM dbo.op_station
-        WHERE op_sta_id = @id
-      `);
-
-    const staRow = staCheck.recordset?.[0];
-    if (!staRow) {
-      return res.status(400).json({
-        message: "Create failed: op_sta_id not found in op_station",
-        actor,
-        error: `op_sta_id not found: ${op_sta_id}`,
-      });
-    }
-
-    const op_sta_name = staRow.op_sta_name ? String(staRow.op_sta_name).trim() : null;
-
     const tx = new sql.Transaction(pool);
     await tx.begin(sql.ISOLATION_LEVEL.SERIALIZABLE);
 
@@ -154,13 +101,13 @@ exports.createTkDoc = async (req, res) => {
       // 1) gen tk_id
       const tk_id = await genTkId(tx, now);
 
-      // 2) insert TKHead (include MC_id)
+      // 2) insert TKHead (MC_id = NULL ตาม flow ใหม่)
       await new sql.Request(tx)
         .input("tk_id", sql.VarChar(20), tk_id)
         .input("created_by_u_id", sql.Int, Number(actor.u_id))
         .input("tk_status", sql.Int, 0)
         .input("tk_created_at_ts", sql.DateTime2(3), now)
-        .input("MC_id", sql.VarChar(10), MC_id)
+        .input("MC_id", sql.VarChar(10), null)
         .query(`
           INSERT INTO ${SAFE_TKHEAD}
             (tk_id, tk_created_at_ts, created_by_u_id, tk_status, MC_id)
@@ -184,11 +131,11 @@ exports.createTkDoc = async (req, res) => {
         throw new Error("DB did not return run_no/lot_no from usp_TKRunLog_Create");
       }
 
-      // 4) insert TKDetail
+      // 4) insert TKDetail (MC_id/op_sta_id = NULL ตาม flow ใหม่)
       await new sql.Request(tx)
         .input("tk_id", sql.VarChar(20), tk_id)
-        .input("MC_id", sql.VarChar(10), MC_id)
-        .input("op_sta_id", sql.VarChar(20), op_sta_id)
+        .input("MC_id", sql.VarChar(10), null)
+        .input("op_sta_id", sql.VarChar(20), null)
         .input("tk_parent_id", sql.VarChar(20), tk_id)
         .input("u_id", sql.Int, Number(actor.u_id))
         .input("part_id", sql.Int, Number(partRow.part_id))
@@ -205,19 +152,19 @@ exports.createTkDoc = async (req, res) => {
       await tx.commit();
 
       console.log(
-        `[TKDOC_CREATE] tk_id=${tk_id} part_id=${partRow.part_id} part_no=${partRow.part_no} MC_id=${MC_id} op_sta_id=${op_sta_id} run_no=${run_no} created_by_u_id=${actor.u_id} createdAt=${now.toISOString()}`
+        `[TKDOC_CREATE] tk_id=${tk_id} part_id=${partRow.part_id} part_no=${partRow.part_no} created_by_u_id=${actor.u_id} createdAt=${now.toISOString()}`
       );
 
-      // ✅ response เพิ่ม MC_name + op_sta_name
+      // ✅ response: บังคับให้โชว์เป็น null ตามที่คุณสั่ง
       return res.status(201).json({
         message: "Created TK document",
         id: tk_id,
         run_no,
         lot_no,
-        MC_id,
-        MC_name,
-        op_sta_id,
-        op_sta_name,
+        MC_id: null,
+        MC_name: null,
+        op_sta_id: null,
+        op_sta_name: null,
         created_at: now.toISOString(),
       });
     } catch (e) {
@@ -232,7 +179,7 @@ exports.createTkDoc = async (req, res) => {
     });
   }
 };
-// เผื่อ route import ชื่อ createTkDocument
+
 exports.createTkDocument = exports.createTkDoc;
 
 exports.listTkDocs = async (req, res) => {

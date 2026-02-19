@@ -6,6 +6,14 @@ const OP_SCAN_TABLE =
   process.env.OP_SCAN_TABLE || process.env.OPSCAN_TABLE || "dbo.op_scan";
 const TKDETAIL_TABLE = process.env.TKDETAIL_TABLE || "dbo.TKDetail";
 const MACHINE_TABLE = process.env.MACHINE_TABLE || "dbo.machine";
+const PART_TABLE = process.env.PART_TABLE || "dbo.part";
+const TRANSFER_TABLE = process.env.TRANSFER_TABLE || "dbo.t_transfer";
+
+const SAFE_OPSCAN = safeTableName(OP_SCAN_TABLE);
+const SAFE_TKDETAIL = safeTableName(TKDETAIL_TABLE);
+const SAFE_MACHINE = safeTableName(MACHINE_TABLE);
+const SAFE_PART = safeTableName(PART_TABLE);
+const SAFE_TRANSFER = safeTableName(TRANSFER_TABLE);
 
 function safeTableName(fullName) {
   const s = String(fullName || "");
@@ -14,11 +22,6 @@ function safeTableName(fullName) {
   }
   return s;
 }
-
-const SAFE_OPSCAN = safeTableName(OP_SCAN_TABLE);
-const SAFE_TKDETAIL = safeTableName(TKDETAIL_TABLE);
-const SAFE_MACHINE = safeTableName(MACHINE_TABLE);
-
 function pad(n, len) {
   return String(n).padStart(len, "0");
 }
@@ -42,6 +45,8 @@ function actorOf(req) {
     u_name: req.user?.u_name ?? "unknown",
     role: req.user?.role ?? "unknown",
     u_type: req.user?.u_type ?? "unknown",
+    op_sta_id: req.user?.op_sta_id ?? null,
+    op_sta_name: req.user?.op_sta_name ?? null,
     clientType: normalizeClientType(req.headers["x-client-type"]),
   };
 }
@@ -93,6 +98,49 @@ async function getLotNoByTkId(txOrPool, tk_id) {
     `);
 
   return r.recordset?.[0]?.lot_no ?? null;
+}
+
+function normalizeSplits(body) {
+  if (Array.isArray(body?.splits) && body.splits.length > 0) {
+    return body.splits.map((x) => ({
+      out_part_no: String(x?.out_part_no || "").trim(),
+      qty: Number(x?.qty),
+    }));
+  }
+  return [];
+}
+
+async function getPartByNo(tx, part_no) {
+  const r = await new sql.Request(tx)
+    .input("part_no", sql.VarChar(100), String(part_no).trim())
+    .query(`
+      SELECT TOP 1 part_id, part_no, part_name
+      FROM ${SAFE_PART} WITH (NOLOCK)
+      WHERE part_no = @part_no
+    `);
+  return r.recordset?.[0] ?? null;
+}
+
+async function genTransferId(tx, now) {
+  // ใช้รูปแบบ TFyymmdd#### เหมือนเดิม
+  const prefix = `TF${yymmdd(now)}`;
+  const r = await new sql.Request(tx)
+    .input("likePrefix", sql.VarChar(20), `${prefix}%`)
+    .query(`
+      SELECT TOP 1 transfer_id
+      FROM ${SAFE_TRANSFER} WITH (UPDLOCK, HOLDLOCK)
+      WHERE transfer_id LIKE @likePrefix
+      ORDER BY transfer_id DESC
+    `);
+
+  let running = 1;
+  if (r.recordset?.length) {
+    const lastId = String(r.recordset[0].transfer_id || "");
+    const tail = lastId.slice(prefix.length);
+    const n = parseInt(tail, 10);
+    if (!Number.isNaN(n)) running = n + 1;
+  }
+  return `${prefix}${pad(running, 4)}`;
 }
 
 exports.listAllActiveOpScans = async (req, res) => {
@@ -261,6 +309,10 @@ exports.startOpScan = async (req, res) => {
   if (!tk_id) return res.status(400).json({ message: "tk_id is required", actor });
   if (!MC_id) return res.status(400).json({ message: "MC_id is required", actor });
 
+  // ✅ station ต้องมาจาก token (login HH)
+  const op_sta_id = actor.op_sta_id ? String(actor.op_sta_id).trim() : "";
+  if (!op_sta_id) return res.status(400).json({ message: "op_sta_id missing in token", actor });
+
   try {
     const pool = await getPool();
     const tx = new sql.Transaction(pool);
@@ -269,14 +321,14 @@ exports.startOpScan = async (req, res) => {
     try {
       const now = new Date();
 
+      // lock tkdetail
       const tkDetailR = await new sql.Request(tx)
         .input("tk_id", sql.VarChar(20), tk_id)
         .query(`
           SELECT TOP 1
             d.tk_id,
-            d.MC_id          AS tk_MC_id,
+            d.MC_id,
             d.op_sta_id,
-            s.op_sta_name,
             d.part_id,
             p.part_no,
             p.part_name,
@@ -285,7 +337,6 @@ exports.startOpScan = async (req, res) => {
             d.tk_created_at_ts
           FROM ${SAFE_TKDETAIL} d WITH (UPDLOCK, HOLDLOCK)
           LEFT JOIN dbo.part p ON p.part_id = d.part_id
-          LEFT JOIN dbo.op_station s ON s.op_sta_id = d.op_sta_id
           WHERE d.tk_id = @tk_id
           ORDER BY d.tk_created_at_ts DESC
         `);
@@ -298,14 +349,34 @@ exports.startOpScan = async (req, res) => {
 
       const lot_no = tkDoc.lot_no || null;
 
+      // ✅ validate machine + ต้องอยู่ station เดียวกับที่ login มา
       const mcR = await new sql.Request(tx)
         .input("MC_id", sql.VarChar(10), MC_id)
-        .query(`SELECT TOP 1 MC_id FROM ${SAFE_MACHINE} WHERE MC_id=@MC_id`);
-      if (!mcR.recordset?.[0]) {
+        .query(`
+          SELECT TOP 1 MC_id, op_sta_id
+          FROM ${SAFE_MACHINE} WITH (NOLOCK)
+          WHERE MC_id=@MC_id
+        `);
+
+      const mcRow = mcR.recordset?.[0];
+      if (!mcRow) {
         await tx.rollback();
         return res.status(400).json({ message: "MC_id not found", actor, MC_id });
       }
 
+      const mc_sta = mcRow.op_sta_id ? String(mcRow.op_sta_id).trim() : "";
+      if (mc_sta && mc_sta !== op_sta_id) {
+        await tx.rollback();
+        return res.status(400).json({
+          message: "MC_id does not belong to your station",
+          actor,
+          MC_id,
+          mc_op_sta_id: mc_sta,
+          token_op_sta_id: op_sta_id,
+        });
+      }
+
+      // check active scan
       const activeR = await new sql.Request(tx)
         .input("tk_id", sql.VarChar(20), tk_id)
         .query(`
@@ -322,20 +393,21 @@ exports.startOpScan = async (req, res) => {
           actor,
           tk_id,
           op_sc_id: activeR.recordset[0].op_sc_id,
-          tk_doc: {
-            tk_id: tkDoc.tk_id,
-            lot_no: tkDoc.lot_no,
-            part_no: tkDoc.part_no,
-            part_name: tkDoc.part_name,
-            op_sta_id: tkDoc.op_sta_id,
-            op_sta_name: tkDoc.op_sta_name,
-            tk_status: tkDoc.tk_status,
-            tk_created_at_ts: tkDoc.tk_created_at_ts
-              ? new Date(tkDoc.tk_created_at_ts).toISOString()
-              : null,
-          },
         });
       }
+
+      // ✅ update TKDetail ให้มี MC_id/op_sta_id (แก้ปัญหาที่คุณถาม)
+      await new sql.Request(tx)
+        .input("tk_id", sql.VarChar(20), tk_id)
+        .input("MC_id", sql.VarChar(10), MC_id)
+        .input("op_sta_id", sql.VarChar(20), op_sta_id)
+        .query(`
+          UPDATE ${SAFE_TKDETAIL}
+          SET
+            MC_id = @MC_id,
+            op_sta_id = @op_sta_id
+          WHERE tk_id = @tk_id
+        `);
 
       const op_sc_id = await genOpScId(tx, now);
 
@@ -363,6 +435,10 @@ exports.startOpScan = async (req, res) => {
 
       await tx.commit();
 
+      console.log(
+        `[OPSCAN_START] op_sc_id=${op_sc_id} tk_id=${tk_id} MC_id=${MC_id} op_sta_id=${op_sta_id} u_id=${actor.u_id} u_name=${actor.u_name} ts=${now.toISOString()}`
+      );
+
       return res.status(201).json({
         message: "Started",
         actor: { u_id: actor.u_id, u_name: actor.u_name, role: actor.role },
@@ -375,8 +451,8 @@ exports.startOpScan = async (req, res) => {
           part_id: tkDoc.part_id,
           part_no: tkDoc.part_no,
           part_name: tkDoc.part_name,
-          op_sta_id: tkDoc.op_sta_id,
-          op_sta_name: tkDoc.op_sta_name,
+          op_sta_id: op_sta_id,
+          op_sta_name: actor.op_sta_name ?? null,
           tk_status: tkDoc.tk_status,
           tk_created_at_ts: tkDoc.tk_created_at_ts
             ? new Date(tkDoc.tk_created_at_ts).toISOString()
@@ -405,7 +481,6 @@ exports.finishOpScan = async (req, res) => {
   const scrap_qty_raw = Number(req.body.scrap_qty);
 
   if (!op_sc_id) return res.status(400).json({ message: "op_sc_id is required", actor });
-
   if (![good_qty_raw, scrap_qty_raw].every(Number.isFinite)) {
     return res.status(400).json({ message: "good_qty/scrap_qty must be numbers", actor });
   }
@@ -423,8 +498,42 @@ exports.finishOpScan = async (req, res) => {
     return res.status(400).json({ message: "tf_rs_code must be 1,2,3", actor });
   }
 
+  // --- helpers (local) ---
+  const SAFE_TRANSFER = safeTableName(process.env.TRANSFER_TABLE || "dbo.t_transfer");
+  const SAFE_PART = safeTableName(process.env.PART_TABLE || "dbo.part");
+
+  const normalizeSplits = (body) => {
+    if (Array.isArray(body?.splits) && body.splits.length > 0) {
+      return body.splits.map((x) => ({
+        out_part_no: String(x?.out_part_no || "").trim(),
+        qty: Number(x?.qty),
+      }));
+    }
+    return [];
+  };
+
+  const splits = normalizeSplits(req.body);
+
+  if (tf_rs_code === 2) {
+    if (splits.length === 0) {
+      return res.status(400).json({ message: "splits[] is required when tf_rs_code=2", actor });
+    }
+    for (const s of splits) {
+      if (!s.out_part_no) return res.status(400).json({ message: "out_part_no is required", actor });
+      if (!Number.isFinite(s.qty) || s.qty <= 0) return res.status(400).json({ message: "qty must be > 0", actor });
+    }
+    const sumQty = splits.reduce((acc, s) => acc + Math.trunc(s.qty), 0);
+    if (sumQty !== Math.trunc(good_qty)) {
+      return res.status(400).json({
+        message: "Sum of splits qty must equal good_qty",
+        actor,
+        good_qty: Math.trunc(good_qty),
+        sum_splits_qty: sumQty,
+      });
+    }
+  }
+
   const out_part_no = String(req.body.out_part_no || "").trim();
-  const result = buildResultString(good_qty, scrap_qty);
 
   try {
     const pool = await getPool();
@@ -434,6 +543,7 @@ exports.finishOpScan = async (req, res) => {
     try {
       const now = new Date();
 
+      // 1) lock op_scan row
       const rowR = await new sql.Request(tx)
         .input("op_sc_id", sql.Char(12), op_sc_id)
         .query(`
@@ -447,7 +557,6 @@ exports.finishOpScan = async (req, res) => {
         await tx.rollback();
         return res.status(404).json({ message: "op_sc_id not found", actor, op_sc_id });
       }
-
       if (row.op_sc_finish_ts) {
         await tx.rollback();
         return res.status(409).json({
@@ -457,15 +566,23 @@ exports.finishOpScan = async (req, res) => {
         });
       }
 
-      const lot_no = await getLotNoByTkId(tx, row.tk_id);
+      const master_tk_id = String(row.tk_id || "").trim();
+      if (!master_tk_id) {
+        await tx.rollback();
+        return res.status(400).json({ message: "op_scan.tk_id is NULL", actor, op_sc_id });
+      }
 
+      // master lot_no
+      const master_lot_no = await getLotNoByTkId(tx, master_tk_id);
+
+      // 2) update op_scan finish
       await new sql.Request(tx)
         .input("op_sc_id", sql.Char(12), op_sc_id)
         .input("total_qty", sql.Int, Math.trunc(total_qty))
         .input("good_qty", sql.Int, Math.trunc(good_qty))
         .input("scrap_qty", sql.Int, Math.trunc(scrap_qty))
         .input("tf_rs_code", sql.Int, tf_rs_code)
-        .input("lot_no", sql.NVarChar(300), lot_no)
+        .input("lot_no", sql.NVarChar(300), master_lot_no)
         .input("finish_ts", sql.DateTime2(3), now)
         .query(`
           UPDATE ${SAFE_OPSCAN}
@@ -479,16 +596,93 @@ exports.finishOpScan = async (req, res) => {
           WHERE op_sc_id = @op_sc_id
         `);
 
+      // 3) split (tf_rs_code=2) -> gen new lot_no (same tk_id) + insert t_transfer
+      const created_children = [];
+
+      if (tf_rs_code === 2) {
+        for (const s of splits) {
+          const partR = await new sql.Request(tx)
+            .input("part_no", sql.VarChar(100), s.out_part_no)
+            .query(`
+              SELECT TOP 1 part_id, part_no, part_name
+              FROM ${SAFE_PART} WITH (NOLOCK)
+              WHERE part_no = @part_no
+            `);
+
+          const part = partR.recordset?.[0];
+          if (!part) {
+            await tx.rollback();
+            return res.status(400).json({ message: "out_part_no not found", actor, out_part_no: s.out_part_no });
+          }
+
+          // gen run_no + new lot_no (same tk_id)
+          const sp = await new sql.Request(tx)
+            .input("tk_id", sql.VarChar(20), master_tk_id)
+            .input("part_id", sql.Int, Number(part.part_id))
+            .input("created_by_u_id", sql.Int, Number(actor.u_id))
+            .output("run_no", sql.Char(14))
+            .output("lot_no", sql.NVarChar(300))
+            .execute("dbo.usp_TKRunLog_Create");
+
+          const run_no = sp.output.run_no;
+          const child_lot_no = sp.output.lot_no;
+
+          if (!run_no || !child_lot_no) {
+            throw new Error("DB did not return run_no/lot_no from dbo.usp_TKRunLog_Create");
+          }
+
+          // insert t_transfer (ไม่ใส่ transfer_id เพราะเป็น IDENTITY)
+          await new sql.Request(tx)
+            .input("from_tk_id", sql.VarChar(20), master_tk_id)
+            .input("to_tk_id", sql.VarChar(20), master_tk_id) // tk_id เดิมตาม requirement
+            .input("from_lot_no", sql.NVarChar(300), master_lot_no)
+            .input("to_lot_no", sql.NVarChar(300), String(child_lot_no))
+            .input("tf_rs_code", sql.Int, 2)
+            .input("transfer_qty", sql.Int, Math.trunc(s.qty))
+            .input("op_sc_id", sql.Char(12), op_sc_id)
+            .input("MC_id", sql.VarChar(10), row.MC_id ? String(row.MC_id).trim() : null)
+            .input("created_by_u_id", sql.Int, Number(actor.u_id))
+            .input("transfer_ts", sql.DateTime2(3), now)
+            .query(`
+              INSERT INTO ${SAFE_TRANSFER}
+                (from_tk_id, to_tk_id, from_lot_no, to_lot_no,
+                 tf_rs_code, transfer_qty,
+                 op_sc_id, MC_id, created_by_u_id,
+                 transfer_ts)
+              VALUES
+                (@from_tk_id, @to_tk_id, @from_lot_no, @to_lot_no,
+                 @tf_rs_code, @transfer_qty,
+                 @op_sc_id, @MC_id, @created_by_u_id,
+                 @transfer_ts)
+            `);
+
+          created_children.push({
+            tk_id: master_tk_id,
+            run_no: String(run_no).trim(),
+            lot_no: String(child_lot_no),
+            out_part_no: String(part.part_no),
+            out_part_name: part.part_name ? String(part.part_name) : null,
+            qty: Math.trunc(s.qty),
+          });
+        }
+      }
+
       await tx.commit();
+
+      console.log(
+        `[OPSCAN_FINISH] op_sc_id=${op_sc_id} tk_id=${master_tk_id} MC_id=${row.MC_id ?? "-"} tf_rs_code=${tf_rs_code} good=${Math.trunc(
+          good_qty
+        )} scrap=${Math.trunc(scrap_qty)} total=${Math.trunc(total_qty)} children=${created_children.length} u_id=${actor.u_id} u_name=${actor.u_name} ts=${now.toISOString()}`
+      );
 
       return res.json({
         message: "Finished",
         actor: { u_id: actor.u_id, u_name: actor.u_name, role: actor.role },
 
         op_sc_id,
-        tk_id: row.tk_id,
-        MC_id: row.MC_id,
-        lot_no,
+        tk_id: master_tk_id,
+        MC_id: row.MC_id ?? null,
+        lot_no: master_lot_no,
 
         op_sc_total_qty: Math.trunc(total_qty),
         op_sc_good_qty: Math.trunc(good_qty),
@@ -496,7 +690,9 @@ exports.finishOpScan = async (req, res) => {
         tf_rs_code,
 
         out_part_no,
-        result,
+
+        created_children_count: created_children.length,
+        created_children,
 
         op_sc_ts: row.op_sc_ts ? new Date(row.op_sc_ts).toISOString() : null,
         op_sc_finish_ts: now.toISOString(),

@@ -1,15 +1,19 @@
+// routes/transfers.routes.js
 const express = require("express");
 const router = express.Router();
 
-const { requireAuth, requireRole, requireClientType } = require("../middleware/auth.middleware");
-const { splitTransfer } = require("../controllers/transfers.controller");
+const transfers = require("../controllers/transfers.controller");
 
-router.post(
-  "/split",
-  requireAuth,
-  requireRole(["admin", "operator"]),
-  requireClientType(["HH", "PC"]),
-  splitTransfer
-);
+// ✅ Keep GET for viewing logs
+router.get("/", transfers.listTransfers);
+router.get("/:transfer_id", transfers.getTransferById);
+
+// ⛔ Disable POST split (deprecated)
+router.post("/split", (req, res) => {
+  return res.status(410).json({
+    message:
+      "This endpoint is deprecated. Use POST /api/op-scan/finish with tf_rs_code=2 (Split) instead.",
+  });
+});
 
 module.exports = router;
