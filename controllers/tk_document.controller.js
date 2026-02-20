@@ -101,19 +101,18 @@ exports.createTkDoc = async (req, res) => {
       // 1) gen tk_id
       const tk_id = await genTkId(tx, now);
 
-      // 2) insert TKHead (MC_id = NULL ตาม flow ใหม่)
-      await new sql.Request(tx)
-        .input("tk_id", sql.VarChar(20), tk_id)
-        .input("created_by_u_id", sql.Int, Number(actor.u_id))
-        .input("tk_status", sql.Int, 0)
-        .input("tk_created_at_ts", sql.DateTime2(3), now)
-        .input("MC_id", sql.VarChar(10), null)
-        .query(`
-          INSERT INTO ${SAFE_TKHEAD}
-            (tk_id, tk_created_at_ts, created_by_u_id, tk_status, MC_id)
-          VALUES
-            (@tk_id, @tk_created_at_ts, @created_by_u_id, @tk_status, @MC_id)
-        `);
+     // 2) insert TKHead (อย่าใส่ MC_id ถ้า TKHead ไม่มีคอลัมน์นี้)
+await new sql.Request(tx)
+  .input("tk_id", sql.VarChar(20), tk_id)
+  .input("created_by_u_id", sql.Int, Number(actor.u_id))
+  .input("tk_status", sql.Int, 0)
+  .input("tk_created_at_ts", sql.DateTime2(3), now)
+  .query(`
+    INSERT INTO ${SAFE_TKHEAD}
+      (tk_id, tk_created_at_ts, created_by_u_id, tk_status)
+    VALUES
+      (@tk_id, @tk_created_at_ts, @created_by_u_id, @tk_status)
+  `);
 
       // 3) DB generates run_no + lot_no and inserts TKRunLog
       const spResult = await new sql.Request(tx)
