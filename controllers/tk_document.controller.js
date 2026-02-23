@@ -187,8 +187,7 @@ exports.listTkDocs = async (req, res) => {
   try {
     const pool = await getPool();
 
-    // Use TKDetail as the main source (field names match your table)
-    // Only take "document root tray" rows (tk_parent_id = tk_id)
+    // 🔴 JOIN TKHead เพื่อดึง tk_status ที่ถูกต้อง
     const r = await pool.request().query(`
       SELECT
         d.tk_id,
@@ -200,40 +199,39 @@ exports.listTkDocs = async (req, res) => {
         p.part_no,
         p.part_name,
         d.lot_no,
-        d.tk_status,
-        d.tk_created_at_ts
-      FROM ${TKDETAIL_TABLE} d
-      LEFT JOIN dbo.part p ON p.part_id = d.part_id
+        h.tk_status,
+        h.tk_created_at_ts
+      FROM ${SAFE_TKDETAIL} d
+      LEFT JOIN ${SAFE_TKHEAD} h  ON h.tk_id = d.tk_id
+      LEFT JOIN dbo.part p        ON p.part_id = d.part_id
       WHERE d.tk_parent_id = d.tk_id
-      ORDER BY d.tk_created_at_ts DESC;
+      ORDER BY h.tk_created_at_ts DESC;
     `);
 
-    // Keep shape consistent with get: id + lot_no on top, full info in detail
     const items = (r.recordset || []).map((x) => ({
-      id: x.tk_id,
+      id:     x.tk_id,
       lot_no: x.lot_no,
       detail: {
-        tk_id: x.tk_id,
-        MC_id: x.MC_id,
-        op_sta_id: x.op_sta_id,
-        tk_parent_id: x.tk_parent_id,
-        u_id: x.u_id,
-        part_id: x.part_id,
-        part_no: x.part_no,
-        part_name: x.part_name,
-        lot_no: x.lot_no,
-        tk_status: x.tk_status,
+        tk_id:            x.tk_id,
+        MC_id:            x.MC_id,
+        op_sta_id:        x.op_sta_id,
+        tk_parent_id:     x.tk_parent_id,
+        u_id:             x.u_id,
+        part_id:          x.part_id,
+        part_no:          x.part_no,
+        part_name:        x.part_name,
+        lot_no:           x.lot_no,
+        tk_status:        x.tk_status,       // ✅ มาจาก TKHead แล้ว
         tk_created_at_ts: x.tk_created_at_ts,
       },
     }));
 
-    return res.json({ actor, items });
+    return res.json({ actor, total: items.length, items });
   } catch (err) {
     console.error("[TKDOC_LIST][ERROR]", err);
     return res.status(500).json({ message: "List failed", error: err.message });
   }
 };
-
 
 
 exports.getTkDocById = async (req, res) => {
@@ -244,11 +242,15 @@ exports.getTkDocById = async (req, res) => {
   try {
     const pool = await getPool();
 
-    // head (ใช้แค่เช็คว่ามีเอกสาร)
+    // 🔴 ดึง tk_status จาก TKHead ด้วย ไม่ใช่แค่เช็คว่ามีอยู่
     const headR = await pool.request()
       .input("id", sql.VarChar(20), id)
       .query(`
-        SELECT TOP 1 tk_id
+        SELECT TOP 1
+          tk_id,
+          tk_status,
+          created_by_u_id,
+          tk_created_at_ts
         FROM ${SAFE_TKHEAD}
         WHERE tk_id = @id
       `);
@@ -256,7 +258,7 @@ exports.getTkDocById = async (req, res) => {
     const head = headR.recordset?.[0];
     if (!head) return res.status(404).json({ message: "Not found", id, actor });
 
-    // detail (first tray) — field name ให้ตรงกับตาราง TKDetail
+    // detail (first tray)
     const detailR = await pool.request()
       .input("id", sql.VarChar(20), id)
       .query(`
@@ -270,11 +272,10 @@ exports.getTkDocById = async (req, res) => {
           p.part_no,
           p.part_name,
           d.lot_no,
-          d.tk_status,
           d.tk_created_at_ts
         FROM ${SAFE_TKDETAIL} d
         LEFT JOIN dbo.part p ON p.part_id = d.part_id
-        WHERE d.tk_id = @id
+        WHERE d.tk_id        = @id
           AND d.tk_parent_id = @id
         ORDER BY d.tk_created_at_ts ASC
       `);
@@ -297,42 +298,43 @@ exports.getTkDocById = async (req, res) => {
       `);
 
     const runlogs = (runlogR.recordset || []).map((x) => ({
-      run_no: x.run_no ? String(x.run_no).trim() : null,
-      lot_no: x.lot_no || null,
-      created_at_ts: x.created_at_ts ? new Date(x.created_at_ts).toISOString() : null,
+      run_no:          x.run_no ? String(x.run_no).trim() : null,
+      lot_no:          x.lot_no || null,
+      created_at_ts:   x.created_at_ts ? new Date(x.created_at_ts).toISOString() : null,
       created_by_u_id: x.created_by_u_id ?? null,
-      part_id: x.part_id ?? null,
+      part_id:         x.part_id ?? null,
     }));
 
     const latestRunNo = runlogs[0]?.run_no ?? null;
     const latestLotNo = runlogs[0]?.lot_no ?? (detailRow?.lot_no ?? null);
 
-    console.log(`[TKDOC_GET] tk_id=${id} run_no=${latestRunNo || "-"} actor_u_id=${actor.u_id ?? "-"}`);
+    console.log(`[TKDOC_GET] tk_id=${id} tk_status=${head.tk_status} run_no=${latestRunNo || "-"} actor_u_id=${actor.u_id ?? "-"}`);
 
     return res.json({
       actor,
       id,
-      lot_no: latestLotNo,
+      lot_no:    latestLotNo,
+      // 🔴 tk_status มาจาก TKHead ที่ถูกต้อง
+      tk_status: head.tk_status,
+      is_finished: head.tk_status === 1,
 
       detail: detailRow
         ? {
-            // ✅ ตรงกับตาราง TKDetail
-            tk_id: detailRow.tk_id,
-            MC_id: detailRow.MC_id,
-            op_sta_id: detailRow.op_sta_id,
-            tk_parent_id: detailRow.tk_parent_id,
-            u_id: detailRow.u_id,
-            part_id: detailRow.part_id,
-            lot_no: detailRow.lot_no,
-            tk_status: detailRow.tk_status,
+            tk_id:            detailRow.tk_id,
+            MC_id:            detailRow.MC_id,
+            op_sta_id:        detailRow.op_sta_id,
+            tk_parent_id:     detailRow.tk_parent_id,
+            u_id:             detailRow.u_id,
+            part_id:          detailRow.part_id,
+            lot_no:           detailRow.lot_no,
+            tk_status:        head.tk_status,    // ✅ มาจาก TKHead
+            is_finished:      head.tk_status === 1,
             tk_created_at_ts: detailRow.tk_created_at_ts
               ? new Date(detailRow.tk_created_at_ts).toISOString()
               : null,
-
-            // ✅ เพิ่มไว้โชว์ (ไม่ชนชื่อคอลัมน์)
-            part_no: detailRow.part_no,
+            part_no:   detailRow.part_no,
             part_name: detailRow.part_name,
-            run_no: latestRunNo,
+            run_no:    latestRunNo,
           }
         : null,
 

@@ -122,49 +122,30 @@ async function getUserById(req, res) {
   }
 }
 
-/**
- * ✅ [เพิ่มใหม่] บังคับสิทธิ์: ให้เฉพาะ ad/ma เท่านั้น
- * - ไม่พึ่ง routes อย่างเดียว (กันพลาด)
- */
-function assertAdminOrManager(req, res) {
-  const u_type = String(req.user?.u_type || "").trim(); // ad / ma / op
-  if (!["ad", "ma"].includes(u_type)) {
-    res.status(403).json({ message: "Forbidden: admin/manager only" });
+
+function assertAdmin(req, res) {
+  const u_type = String(req.user?.u_type || "").trim();
+  if (u_type !== "ad") {
+    res.status(403).json({ message: "Forbidden: admin only" });
     return false;
   }
   return true;
 }
 
-/**
- * ✅ [เพิ่มใหม่] hash password ตามโหมด
- * - PASSWORD_MODE=plain => เก็บ plain
- * - default => bcrypt hash
- */
 async function hashOrPlainPassword(password) {
   const mode = String(process.env.PASSWORD_MODE || "bcrypt").toLowerCase();
   if (mode === "plain") return String(password);
   return bcrypt.hash(String(password), 10);
 }
 
-/**
- * ✅ [เพิ่มใหม่] UPDATE ผู้ใช้ (แก้ได้ครบ 5 ฟิลด์)
- * PUT /api/users/:id
- * body: { u_name?, u_username?, u_password?, u_type?, u_active? }
- *
- * - u_active ใช้ soft delete ได้ (1 -> 0)
- * - u_password ถ้าส่งมา จะ hash ให้ตามโหมด
- * - u_username กันซ้ำให้
- * - สิทธิ์: เฉพาะ ad/ma เท่านั้น
- */
 async function updateUser(req, res) {
-  if (!assertAdminOrManager(req, res)) return;
+if (!assertAdmin(req, res)) return;
 
   const id = Number(req.params.id);
   if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ message: "Invalid user id" });
   }
 
-  // รับค่ามาแบบ optional (ไม่ส่งมาก็ไม่แก้)
   const u_name =
     req.body.u_name !== undefined ? String(req.body.u_name).trim() : undefined;
 
@@ -180,7 +161,6 @@ async function updateUser(req, res) {
   const u_active =
     req.body.u_active !== undefined ? Number(req.body.u_active) : undefined;
 
-  // ต้องส่งมาอย่างน้อย 1 ฟิลด์
   const hasAny =
     u_name !== undefined ||
     u_username !== undefined ||
@@ -194,7 +174,6 @@ async function updateUser(req, res) {
     });
   }
 
-  // validate ทีละตัว (เฉพาะตัวที่ส่งมา)
   if (u_name !== undefined && !u_name) {
     return res.status(400).json({ message: "u_name ห้ามเป็นค่าว่าง" });
   }
@@ -207,10 +186,9 @@ async function updateUser(req, res) {
     return res.status(400).json({ message: "u_password ห้ามเป็นค่าว่าง" });
   }
 
-  if (u_type !== undefined && !["op", "ad", "ma"].includes(u_type)) {
-    return res.status(400).json({ message: "u_type ต้องเป็น op, ad, ma เท่านั้น" });
-  }
-
+  if (u_type !== undefined && !["op", "ad"].includes(u_type)) {
+  return res.status(400).json({ message: "u_type ต้องเป็น op หรือ ad เท่านั้น" });
+}
   if (u_active !== undefined && ![0, 1].includes(u_active)) {
     return res.status(400).json({ message: "u_active ต้องเป็น 0 หรือ 1 เท่านั้น" });
   }
@@ -250,13 +228,11 @@ async function updateUser(req, res) {
         }
       }
 
-      // 3) ถ้าแก้ password ให้ hash/plain ตามโหมด
       const storedPassword =
         u_password !== undefined ? await hashOrPlainPassword(u_password) : undefined;
 
       const now = new Date();
 
-      // 4) UPDATE ด้วย COALESCE (ส่ง null = ไม่แก้ / ส่งค่าจริง = แก้)
       await new sql.Request(tx)
         .input("u_id", sql.Int, id)
         .input("u_name", sql.NVarChar(255), u_name === undefined ? null : u_name)

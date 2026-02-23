@@ -152,7 +152,10 @@ exports.listAllActiveOpScans = async (req, res) => {
       SELECT TOP (200)
         s.op_sc_id,
         s.tk_id,
+        s.op_sta_id,
+        st.op_sta_name,
         s.MC_id,
+        m.MC_name,
         s.u_id,
         s.op_sc_total_qty,
         s.op_sc_scrap_qty,
@@ -162,6 +165,8 @@ exports.listAllActiveOpScans = async (req, res) => {
         s.op_sc_ts,
         s.op_sc_finish_ts
       FROM ${SAFE_OPSCAN} s WITH (NOLOCK)
+      LEFT JOIN dbo.op_station st ON st.op_sta_id = s.op_sta_id
+      LEFT JOIN dbo.machine    m  ON m.MC_id      = s.MC_id
       OUTER APPLY (
         SELECT TOP 1 d.lot_no
         FROM ${SAFE_TKDETAIL} d WITH (NOLOCK)
@@ -185,41 +190,6 @@ exports.listAllActiveOpScans = async (req, res) => {
   }
 };
 
-exports.listOpScansByTkId = async (req, res) => {
-  const actor = actorOf(req);
-  const tk_id = String(req.params.tk_id || req.params.id || "").trim();
-  if (!tk_id) return res.status(400).json({ message: "tk_id is required", actor });
-
-  try {
-    const pool = await getPool();
-    const r = await pool
-      .request()
-      .input("tk_id", sql.VarChar(20), tk_id)
-      .query(`
-        SELECT TOP (200)
-          s.op_sc_id, s.tk_id, s.MC_id, s.u_id,
-          s.op_sc_total_qty, s.op_sc_scrap_qty, s.op_sc_good_qty,
-          s.tf_rs_code,
-          lot_latest.lot_no AS lot_no,
-          s.op_sc_ts, s.op_sc_finish_ts
-        FROM ${SAFE_OPSCAN} s WITH (NOLOCK)
-        OUTER APPLY (
-          SELECT TOP 1 d.lot_no
-          FROM ${SAFE_TKDETAIL} d WITH (NOLOCK)
-          WHERE d.tk_id = s.tk_id
-          ORDER BY d.tk_created_at_ts DESC
-        ) lot_latest
-        WHERE s.tk_id = @tk_id
-        ORDER BY s.op_sc_ts DESC
-      `);
-
-    return res.json({ actor, tk_id, items: r.recordset });
-  } catch (err) {
-    console.error("[OPSCAN_LIST][ERROR]", err);
-    return res.status(500).json({ message: "List failed", actor, error: err.message });
-  }
-};
-
 exports.getOpScanById = async (req, res) => {
   const actor = actorOf(req);
   const op_sc_id = String(req.params.op_sc_id || req.params.id || "").trim();
@@ -232,12 +202,23 @@ exports.getOpScanById = async (req, res) => {
       .input("op_sc_id", sql.Char(12), op_sc_id)
       .query(`
         SELECT TOP 1
-          s.op_sc_id, s.tk_id, s.MC_id, s.u_id,
-          s.op_sc_total_qty, s.op_sc_scrap_qty, s.op_sc_good_qty,
+          s.op_sc_id,
+          s.tk_id,
+          s.op_sta_id,
+          st.op_sta_name,
+          s.MC_id,
+          m.MC_name,
+          s.u_id,
+          s.op_sc_total_qty,
+          s.op_sc_scrap_qty,
+          s.op_sc_good_qty,
           s.tf_rs_code,
-          lot_latest.lot_no AS lot_no,
-          s.op_sc_ts, s.op_sc_finish_ts
+          lot_latest.lot_no,
+          s.op_sc_ts,
+          s.op_sc_finish_ts
         FROM ${SAFE_OPSCAN} s WITH (NOLOCK)
+        LEFT JOIN dbo.op_station st ON st.op_sta_id = s.op_sta_id
+        LEFT JOIN dbo.machine    m  ON m.MC_id      = s.MC_id
         OUTER APPLY (
           SELECT TOP 1 d.lot_no
           FROM ${SAFE_TKDETAIL} d WITH (NOLOCK)
@@ -257,6 +238,7 @@ exports.getOpScanById = async (req, res) => {
   }
 };
 
+
 exports.getActiveOpScanByTkId = async (req, res) => {
   const actor = actorOf(req);
   const tk_id = String(req.params.tk_id || req.params.id || "").trim();
@@ -269,12 +251,23 @@ exports.getActiveOpScanByTkId = async (req, res) => {
       .input("tk_id", sql.VarChar(20), tk_id)
       .query(`
         SELECT TOP 1
-          s.op_sc_id, s.tk_id, s.MC_id, s.u_id,
-          s.op_sc_total_qty, s.op_sc_scrap_qty, s.op_sc_good_qty,
+          s.op_sc_id,
+          s.tk_id,
+          s.op_sta_id,
+          st.op_sta_name,
+          s.MC_id,
+          m.MC_name,
+          s.u_id,
+          s.op_sc_total_qty,
+          s.op_sc_scrap_qty,
+          s.op_sc_good_qty,
           s.tf_rs_code,
-          lot_latest.lot_no AS lot_no,
-          s.op_sc_ts, s.op_sc_finish_ts
+          lot_latest.lot_no,
+          s.op_sc_ts,
+          s.op_sc_finish_ts
         FROM ${SAFE_OPSCAN} s WITH (NOLOCK)
+        LEFT JOIN dbo.op_station st ON st.op_sta_id = s.op_sta_id
+        LEFT JOIN dbo.machine    m  ON m.MC_id      = s.MC_id
         OUTER APPLY (
           SELECT TOP 1 d.lot_no
           FROM ${SAFE_TKDETAIL} d WITH (NOLOCK)
@@ -296,6 +289,168 @@ exports.getActiveOpScanByTkId = async (req, res) => {
   }
 };
 
+exports.getTkSummary = async (req, res) => {
+  const actor = actorOf(req);
+  const tk_id = String(req.params.tk_id || "").trim();
+  if (!tk_id) return res.status(400).json({ message: "tk_id is required", actor });
+
+  try {
+    const pool = await getPool();
+
+    // 1) TKHead — สถานะปัจจุบันของถาด
+    const headR = await pool.request()
+      .input("tk_id", sql.VarChar(20), tk_id)
+      .query(`
+        SELECT TOP 1
+          h.tk_id,
+          h.tk_status,
+          h.created_by_u_id,
+          h.tk_created_at_ts
+        FROM dbo.TKHead h WITH (NOLOCK)
+        WHERE h.tk_id = @tk_id
+      `);
+
+    const head = headR.recordset?.[0];
+    if (!head) return res.status(404).json({ message: "tk_id not found", actor, tk_id });
+
+    // 2) TKDetail — ข้อมูลชิ้นส่วนปัจจุบัน
+    const detailR = await pool.request()
+      .input("tk_id", sql.VarChar(20), tk_id)
+      .query(`
+        SELECT TOP 1
+          d.tk_id,
+          d.lot_no,
+          d.part_id,
+          p.part_no,
+          p.part_name,
+          d.MC_id,
+          d.op_sta_id,
+          d.tk_created_at_ts
+        FROM ${SAFE_TKDETAIL} d WITH (NOLOCK)
+        LEFT JOIN dbo.part p ON p.part_id = d.part_id
+        WHERE d.tk_id = @tk_id
+        ORDER BY d.tk_created_at_ts DESC
+      `);
+
+    const detail = detailR.recordset?.[0] ?? null;
+
+    // 3) op_scan history — ประวัติการ scan ทุกครั้ง
+    const scanR = await pool.request()
+      .input("tk_id", sql.VarChar(20), tk_id)
+      .query(`
+        SELECT
+          s.op_sc_id,
+          s.op_sta_id,
+          st.op_sta_name,
+          s.MC_id,
+          m.MC_name,
+          s.u_id,
+          u.u_name,
+          s.op_sc_total_qty,
+          s.op_sc_good_qty,
+          s.op_sc_scrap_qty,
+          s.tf_rs_code,
+          s.lot_no,
+          s.op_sc_ts,
+          s.op_sc_finish_ts,
+          CASE
+            WHEN s.op_sc_finish_ts IS NULL THEN 'IN_PROGRESS'
+            ELSE 'DONE'
+          END AS scan_status
+        FROM ${SAFE_OPSCAN} s WITH (NOLOCK)
+        LEFT JOIN dbo.op_station st ON st.op_sta_id = s.op_sta_id
+        LEFT JOIN dbo.machine    m  ON m.MC_id      = s.MC_id
+        LEFT JOIN dbo.[user]     u  ON u.u_id       = s.u_id
+        WHERE s.tk_id = @tk_id
+        ORDER BY s.op_sc_ts ASC
+      `);
+
+    // 4) transfer history — ประวัติการโอน lot
+    const transferR = await pool.request()
+      .input("tk_id", sql.VarChar(20), tk_id)
+      .query(`
+        SELECT
+          t.transfer_id,
+          t.from_lot_no,
+          t.to_lot_no,
+          t.tf_rs_code,
+          t.transfer_qty,
+          t.op_sc_id,
+          t.MC_id,
+          m.MC_name,
+          t.created_by_u_id,
+          u.u_name AS created_by_u_name,
+          t.transfer_ts
+        FROM dbo.t_transfer t WITH (NOLOCK)
+        LEFT JOIN dbo.machine m ON m.MC_id   = t.MC_id
+        LEFT JOIN dbo.[user]  u ON u.u_id    = t.created_by_u_id
+        WHERE t.from_tk_id = @tk_id
+           OR t.to_tk_id   = @tk_id
+        ORDER BY t.transfer_ts ASC
+      `);
+
+    // 5) คำนวณ summary qty
+    const scans       = scanR.recordset   || [];
+    const transfers   = transferR.recordset || [];
+    const totalGood   = scans.reduce((acc, s) => acc + (s.op_sc_good_qty  || 0), 0);
+    const totalScrap  = scans.reduce((acc, s) => acc + (s.op_sc_scrap_qty || 0), 0);
+    const stationsDone = [...new Set(
+      scans
+        .filter(s => s.op_sc_finish_ts)
+        .map(s => s.op_sta_id)
+        .filter(Boolean)
+    )];
+
+    const tk_status_label = {
+      0: "NOT_STARTED",
+      1: "FINISHED",
+      2: "PARTIAL_DONE",
+      3: "IN_PROGRESS",
+    }[head.tk_status] ?? "UNKNOWN";
+
+    console.log(`[TK_SUMMARY] tk_id=${tk_id} tk_status=${head.tk_status} scans=${scans.length} transfers=${transfers.length}`);
+
+    return res.json({
+      actor,
+
+      // ข้อมูลถาด
+      tk_id:            head.tk_id,
+      tk_status:        head.tk_status,
+      tk_status_label,
+      is_finished:      head.tk_status === 1,
+      tk_created_at_ts: head.tk_created_at_ts
+        ? new Date(head.tk_created_at_ts).toISOString()
+        : null,
+
+      // ชิ้นส่วนปัจจุบัน
+      current: detail ? {
+        lot_no:    detail.lot_no,
+        part_id:   detail.part_id,
+        part_no:   detail.part_no,
+        part_name: detail.part_name,
+        MC_id:     detail.MC_id,
+        op_sta_id: detail.op_sta_id,
+      } : null,
+
+      // สรุปรวม
+      summary: {
+        total_scans:   scans.length,
+        total_good:    totalGood,
+        total_scrap:   totalScrap,
+        stations_done: stationsDone,
+      },
+
+      // ประวัติ scan ทุกครั้ง
+      scans,
+
+      // ประวัติการโอน lot
+      transfers,
+    });
+  } catch (err) {
+    console.error("[TK_SUMMARY][ERROR]", err);
+    return res.status(500).json({ message: "Get summary failed", actor, error: err.message });
+  }
+};
 // ------------------------------
 // START
 // ------------------------------

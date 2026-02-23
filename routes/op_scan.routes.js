@@ -24,13 +24,7 @@ router.get(
   opScanController.getActiveOpScanByTkId
 );
 
-router.get(
-  "/op-scan/history/:tk_id",
-  requireAuth,
-  requireRole(["admin", "operator"]),
-  requireClientType(["PC", "HH"]),
-  opScanController.listOpScansByTkId
-);
+
 
 router.get(
   "/op-scan/:op_sc_id",
@@ -38,6 +32,17 @@ router.get(
   requireRole(["admin", "operator"]),
   requireClientType(["PC", "HH"]),
   opScanController.getOpScanById
+);
+
+//ก่อน scan → HH สแกนถาด อยากรู้ว่าถาดนี้ผ่านมาจากไหนแล้ว
+// finish → ดูผลสรุปว่าตัวเองทำอะไรไปบ้าง
+//Admin ดูบน PC → ต้องการ audit trail ย้อนหลัง
+router.get(
+  "/op-scan/summary/:tk_id",
+  requireAuth,
+  requireRole(["admin", "operator"]),
+  requireClientType(["PC", "HH"]),
+  opScanController.getTkSummary
 );
 
 router.post(
@@ -55,5 +60,6 @@ router.post(
   requireClientType(["HH"]),
   opScanController.finishOpScan
 );
+
 
 module.exports = router;
