@@ -478,29 +478,47 @@ exports.startOpScan = async (req, res) => {
       const now = new Date();
 
       // 1) lock tkdetail + ดึง lot_no ปัจจุบัน
-      const tkDetailR = await new sql.Request(tx)
-        .input("tk_id", sql.VarChar(20), tk_id)
-        .query(`
-          SELECT TOP 1
-            d.tk_id,
-            d.part_id,
-            p.part_no,
-            p.part_name,
-            d.lot_no,
-            d.tk_status,
-            d.tk_created_at_ts
-          FROM ${SAFE_TKDETAIL} d WITH (UPDLOCK, HOLDLOCK)
-          LEFT JOIN dbo.part p ON p.part_id = d.part_id
-          WHERE d.tk_id = @tk_id
-          ORDER BY d.tk_created_at_ts DESC
-        `);
+     // 1) lock tkdetail + ดึง lot_no ปัจจุบัน
+const tkDetailR = await new sql.Request(tx)
+  .input("tk_id", sql.VarChar(20), tk_id)
+  .query(`
+    SELECT TOP 1
+      d.tk_id,
+      d.part_id,
+      p.part_no,
+      p.part_name,
+      d.lot_no,
+      d.tk_status,
+      d.tk_created_at_ts
+    FROM ${SAFE_TKDETAIL} d WITH (UPDLOCK, HOLDLOCK)
+    LEFT JOIN dbo.part p ON p.part_id = d.part_id
+    WHERE d.tk_id = @tk_id
+    ORDER BY d.tk_created_at_ts DESC
+  `);
 
-      const tkDoc = tkDetailR.recordset?.[0];
-      if (!tkDoc) {
-        await tx.rollback();
-        return res.status(404).json({ message: "tk_id not found", actor, tk_id });
-      }
+const tkDoc = tkDetailR.recordset?.[0];
+if (!tkDoc) {
+  await tx.rollback();
+  return res.status(404).json({ message: "tk_id not found", actor, tk_id });
+}
 
+// ✅ เพิ่ม — ดึง lot ทั้งหมดที่ active จาก TKRunLog
+const allLotsR = await new sql.Request(tx)
+  .input("tk_id", sql.VarChar(20), tk_id)
+  .query(`
+    SELECT
+      r.run_no,
+      r.lot_no,
+      p.part_no,
+      p.part_name,
+      r.created_at_ts
+    FROM dbo.TKRunLog r WITH (NOLOCK)
+    LEFT JOIN dbo.part p ON p.part_id = r.part_id
+    WHERE r.tk_id = @tk_id
+    ORDER BY r.created_at_ts DESC
+  `);
+
+const allLots = allLotsR.recordset || [];
       // 2) เช็ค STA007 finished
       const finishedR = await new sql.Request(tx)
         .input("tk_id", sql.VarChar(20), tk_id)
@@ -711,6 +729,13 @@ await new sql.Request(tx)
             ? new Date(tkDoc.tk_created_at_ts).toISOString()
             : null,
         },
+        current_lots: allLots.map(l => ({
+    run_no:    l.run_no ? String(l.run_no).trim() : null,
+    lot_no:    l.lot_no,
+    part_no:   l.part_no,
+    part_name: l.part_name,
+  })),
+
       });
     } catch (e) {
       await tx.rollback();
