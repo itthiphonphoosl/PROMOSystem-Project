@@ -60,7 +60,6 @@ async function genTkId(tx, docDate) {
 exports.createTkDoc = async (req, res) => {
   const actor = actorOf(req);
 
-  // route บังคับแล้ว แต่เช็คเพิ่มกันหลุด
   if (actor.role !== "admin") {
     return res.status(403).json({ message: "Forbidden (admin only)", actor });
   }
@@ -73,7 +72,6 @@ exports.createTkDoc = async (req, res) => {
     if (!actor.u_id) return res.status(401).json({ message: "Unauthorized", actor });
     if (!part_no) return res.status(400).json({ message: "part_no is required", actor });
 
-    // lookup part
     const partResult = await pool
       .request()
       .input("part_no", sql.VarChar(50), part_no)
@@ -98,29 +96,26 @@ exports.createTkDoc = async (req, res) => {
     try {
       const now = new Date();
 
-      // 1) gen tk_id
       const tk_id = await genTkId(tx, now);
 
-     // 2) insert TKHead (อย่าใส่ MC_id ถ้า TKHead ไม่มีคอลัมน์นี้)
-await new sql.Request(tx)
-  .input("tk_id", sql.VarChar(20), tk_id)
-  .input("created_by_u_id", sql.Int, Number(actor.u_id))
-  .input("tk_status", sql.Int, 0)
-  .input("tk_created_at_ts", sql.DateTime2(3), now)
-  .query(`
-    INSERT INTO ${SAFE_TKHEAD}
-      (tk_id, tk_created_at_ts, created_by_u_id, tk_status)
-    VALUES
-      (@tk_id, @tk_created_at_ts, @created_by_u_id, @tk_status)
-  `);
+      await new sql.Request(tx)
+        .input("tk_id",            sql.VarChar(20),   tk_id)
+        .input("created_by_u_id",  sql.Int,           Number(actor.u_id))
+        .input("tk_status",        sql.Int,           0)
+        .input("tk_created_at_ts", sql.DateTime2(3),  now)
+        .query(`
+          INSERT INTO ${SAFE_TKHEAD}
+            (tk_id, tk_created_at_ts, created_by_u_id, tk_status)
+          VALUES
+            (@tk_id, @tk_created_at_ts, @created_by_u_id, @tk_status)
+        `);
 
-      // 3) DB generates run_no + lot_no and inserts TKRunLog
       const spResult = await new sql.Request(tx)
-        .input("tk_id", sql.VarChar(20), tk_id)
-        .input("part_id", sql.Int, Number(partRow.part_id))
-        .input("created_by_u_id", sql.Int, Number(actor.u_id))
-        .output("run_no", sql.Char(14))
-        .output("lot_no", sql.NVarChar(300))
+        .input("tk_id",           sql.VarChar(20), tk_id)
+        .input("part_id",         sql.Int,         Number(partRow.part_id))
+        .input("created_by_u_id", sql.Int,         Number(actor.u_id))
+        .output("run_no",         sql.Char(14))
+        .output("lot_no",         sql.NVarChar(300))
         .execute("dbo.usp_TKRunLog_Create");
 
       const run_no = spResult.output.run_no;
@@ -130,41 +125,40 @@ await new sql.Request(tx)
         throw new Error("DB did not return run_no/lot_no from usp_TKRunLog_Create");
       }
 
-      // 4) insert TKDetail (MC_id/op_sta_id = NULL ตาม flow ใหม่)
+      // ✅ ลบ tk_parent_id ออกแล้ว
       await new sql.Request(tx)
-        .input("tk_id", sql.VarChar(20), tk_id)
-        .input("MC_id", sql.VarChar(10), null)
-        .input("op_sta_id", sql.VarChar(20), null)
-        .input("tk_parent_id", sql.VarChar(20), tk_id)
-        .input("u_id", sql.Int, Number(actor.u_id))
-        .input("part_id", sql.Int, Number(partRow.part_id))
-        .input("lot_no", sql.NVarChar(300), lot_no)
-        .input("tk_status", sql.Int, 0)
+        .input("tk_id",            sql.VarChar(20),  tk_id)
+        .input("MC_id",            sql.VarChar(10),  null)
+        .input("op_sta_id",        sql.VarChar(20),  null)
+        .input("op_sc_id",         sql.Char(12),     null)
+        .input("u_id",             sql.Int,          Number(actor.u_id))
+        .input("part_id",          sql.Int,          Number(partRow.part_id))
+        .input("lot_no",           sql.NVarChar(300), lot_no)
+        .input("tk_status",        sql.Int,          0)
         .input("tk_created_at_ts", sql.DateTime2(3), now)
         .query(`
           INSERT INTO ${SAFE_TKDETAIL}
-            (tk_id, MC_id, op_sta_id, tk_parent_id, u_id, part_id, lot_no, tk_status, tk_created_at_ts)
+            (tk_id, MC_id, op_sta_id, op_sc_id, u_id, part_id, lot_no, tk_status, tk_created_at_ts)
           VALUES
-            (@tk_id, @MC_id, @op_sta_id, @tk_parent_id, @u_id, @part_id, @lot_no, @tk_status, @tk_created_at_ts)
+            (@tk_id, @MC_id, @op_sta_id, @op_sc_id, @u_id, @part_id, @lot_no, @tk_status, @tk_created_at_ts)
         `);
 
       await tx.commit();
 
       console.log(
-        `[TKDOC_CREATE] tk_id=${tk_id} part_id=${partRow.part_id} part_no=${partRow.part_no} created_by_u_id=${actor.u_id} createdAt=${now.toISOString()}`
+        `[TKDOC_CREATE] tk_id=${tk_id} part_no=${partRow.part_no} created_by_u_id=${actor.u_id}`
       );
 
-      // ✅ response: บังคับให้โชว์เป็น null ตามที่คุณสั่ง
       return res.status(201).json({
-        message: "Created TK document",
-        id: tk_id,
+        message:     "Created TK document",
+        id:          tk_id,
         run_no,
         lot_no,
-        MC_id: null,
-        MC_name: null,
-        op_sta_id: null,
+        MC_id:       null,
+        MC_name:     null,
+        op_sta_id:   null,
         op_sta_name: null,
-        created_at: now.toISOString(),
+        created_at:  now.toISOString(),
       });
     } catch (e) {
       await tx.rollback();
@@ -172,14 +166,12 @@ await new sql.Request(tx)
     }
   } catch (err) {
     console.error("[TKDOC_CREATE][ERROR]", err);
-    return res.status(500).json({
-      message: "Create failed",
-      error: err.message,
-    });
+    return res.status(500).json({ message: "Create failed", error: err.message });
   }
 };
 
 exports.createTkDocument = exports.createTkDoc;
+
 
 exports.listTkDocs = async (req, res) => {
   const actor = actorOf(req);
@@ -187,13 +179,12 @@ exports.listTkDocs = async (req, res) => {
   try {
     const pool = await getPool();
 
-    // 🔴 JOIN TKHead เพื่อดึง tk_status ที่ถูกต้อง
     const r = await pool.request().query(`
       SELECT
         d.tk_id,
         d.MC_id,
         d.op_sta_id,
-        d.tk_parent_id,
+        d.op_sc_id,
         d.u_id,
         d.part_id,
         p.part_no,
@@ -202,9 +193,8 @@ exports.listTkDocs = async (req, res) => {
         h.tk_status,
         h.tk_created_at_ts
       FROM ${SAFE_TKDETAIL} d
-      LEFT JOIN ${SAFE_TKHEAD} h  ON h.tk_id = d.tk_id
-      LEFT JOIN dbo.part p        ON p.part_id = d.part_id
-      WHERE d.tk_parent_id = d.tk_id
+      LEFT JOIN ${SAFE_TKHEAD} h ON h.tk_id = d.tk_id
+      LEFT JOIN dbo.part p       ON p.part_id = d.part_id
       ORDER BY h.tk_created_at_ts DESC;
     `);
 
@@ -215,13 +205,13 @@ exports.listTkDocs = async (req, res) => {
         tk_id:            x.tk_id,
         MC_id:            x.MC_id,
         op_sta_id:        x.op_sta_id,
-        tk_parent_id:     x.tk_parent_id,
+        op_sc_id:         x.op_sc_id,
         u_id:             x.u_id,
         part_id:          x.part_id,
         part_no:          x.part_no,
         part_name:        x.part_name,
         lot_no:           x.lot_no,
-        tk_status:        x.tk_status,       // ✅ มาจาก TKHead แล้ว
+        tk_status:        x.tk_status,
         tk_created_at_ts: x.tk_created_at_ts,
       },
     }));
@@ -242,7 +232,6 @@ exports.getTkDocById = async (req, res) => {
   try {
     const pool = await getPool();
 
-    // 🔴 ดึง tk_status จาก TKHead ด้วย ไม่ใช่แค่เช็คว่ามีอยู่
     const headR = await pool.request()
       .input("id", sql.VarChar(20), id)
       .query(`
@@ -258,7 +247,6 @@ exports.getTkDocById = async (req, res) => {
     const head = headR.recordset?.[0];
     if (!head) return res.status(404).json({ message: "Not found", id, actor });
 
-    // detail (first tray)
     const detailR = await pool.request()
       .input("id", sql.VarChar(20), id)
       .query(`
@@ -266,7 +254,7 @@ exports.getTkDocById = async (req, res) => {
           d.tk_id,
           d.MC_id,
           d.op_sta_id,
-          d.tk_parent_id,
+          d.op_sc_id,
           d.u_id,
           d.part_id,
           p.part_no,
@@ -275,14 +263,12 @@ exports.getTkDocById = async (req, res) => {
           d.tk_created_at_ts
         FROM ${SAFE_TKDETAIL} d
         LEFT JOIN dbo.part p ON p.part_id = d.part_id
-        WHERE d.tk_id        = @id
-          AND d.tk_parent_id = @id
+        WHERE d.tk_id = @id
         ORDER BY d.tk_created_at_ts ASC
       `);
 
     const detailRow = detailR.recordset?.[0] || null;
 
-    // runlogs
     const runlogR = await pool.request()
       .input("id", sql.VarChar(20), id)
       .query(`
@@ -308,44 +294,37 @@ exports.getTkDocById = async (req, res) => {
     const latestRunNo = runlogs[0]?.run_no ?? null;
     const latestLotNo = runlogs[0]?.lot_no ?? (detailRow?.lot_no ?? null);
 
-    console.log(`[TKDOC_GET] tk_id=${id} tk_status=${head.tk_status} run_no=${latestRunNo || "-"} actor_u_id=${actor.u_id ?? "-"}`);
+    console.log(`[TKDOC_GET] tk_id=${id} tk_status=${head.tk_status} run_no=${latestRunNo || "-"}`);
 
     return res.json({
       actor,
       id,
-      lot_no:    latestLotNo,
-      // 🔴 tk_status มาจาก TKHead ที่ถูกต้อง
-      tk_status: head.tk_status,
+      lot_no:      latestLotNo,
+      tk_status:   head.tk_status,
       is_finished: head.tk_status === 1,
 
-      detail: detailRow
-        ? {
-            tk_id:            detailRow.tk_id,
-            MC_id:            detailRow.MC_id,
-            op_sta_id:        detailRow.op_sta_id,
-            tk_parent_id:     detailRow.tk_parent_id,
-            u_id:             detailRow.u_id,
-            part_id:          detailRow.part_id,
-            lot_no:           detailRow.lot_no,
-            tk_status:        head.tk_status,    // ✅ มาจาก TKHead
-            is_finished:      head.tk_status === 1,
-            tk_created_at_ts: detailRow.tk_created_at_ts
-              ? new Date(detailRow.tk_created_at_ts).toISOString()
-              : null,
-            part_no:   detailRow.part_no,
-            part_name: detailRow.part_name,
-            run_no:    latestRunNo,
-          }
-        : null,
+      detail: detailRow ? {
+        tk_id:            detailRow.tk_id,
+        MC_id:            detailRow.MC_id,
+        op_sta_id:        detailRow.op_sta_id,
+        op_sc_id:         detailRow.op_sc_id,
+        u_id:             detailRow.u_id,
+        part_id:          detailRow.part_id,
+        lot_no:           detailRow.lot_no,
+        tk_status:        head.tk_status,
+        is_finished:      head.tk_status === 1,
+        tk_created_at_ts: detailRow.tk_created_at_ts
+          ? new Date(detailRow.tk_created_at_ts).toISOString()
+          : null,
+        part_no:   detailRow.part_no,
+        part_name: detailRow.part_name,
+        run_no:    latestRunNo,
+      } : null,
 
       runlogs,
     });
   } catch (err) {
     console.error("[TKDOC_GET][ERROR]", err);
-    return res.status(500).json({
-      message: "Get failed",
-      actor,
-      error: err.message,
-    });
+    return res.status(500).json({ message: "Get failed", actor, error: err.message });
   }
 };
