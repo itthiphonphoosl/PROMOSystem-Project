@@ -144,18 +144,39 @@ async function genTransferId(tx, now) {
 }
 
 exports.listAllActiveOpScans = async (req, res) => {
-  const actor = actorOf(req);
+  // ✅ ต้องมี actor ก่อน
+  const actor =
+    (typeof actorOf === "function" && actorOf(req)) ||
+    {
+      u_id: req.user?.u_id,
+      u_name: req.user?.u_name,
+      role: req.user?.role,
+      u_type: req.user?.u_type,
+      op_sta_id: req.user?.op_sta_id,
+      op_sta_name: req.user?.op_sta_name,
+      clientType: req.user?.clientType,
+    };
+
+  const isOperator = actor.role === "operator" || actor.u_type === "op";
+  const opSta = actor.op_sta_id ? String(actor.op_sta_id).trim() : "";
+
+  if (isOperator && !opSta) {
+    return res.status(400).json({ message: "Missing op_sta_id in token", actor });
+  }
 
   try {
     const pool = await getPool();
-    const r = await pool.request().query(`
+
+    const reqQ = pool.request();
+    if (isOperator) reqQ.input("op_sta_id", sql.VarChar(20), opSta);
+
+    const r = await reqQ.query(`
       SELECT TOP (200)
         s.op_sc_id,
         s.tk_id,
-        s.op_sta_id,
+        COALESCE(s.op_sta_id, m.op_sta_id) AS op_sta_id,
         st.op_sta_name,
         s.MC_id,
-        m.MC_name,
         s.u_id,
         s.op_sc_total_qty,
         s.op_sc_scrap_qty,
@@ -165,8 +186,9 @@ exports.listAllActiveOpScans = async (req, res) => {
         s.op_sc_ts,
         s.op_sc_finish_ts
       FROM ${SAFE_OPSCAN} s WITH (NOLOCK)
-      LEFT JOIN dbo.op_station st ON st.op_sta_id = s.op_sta_id
-      LEFT JOIN dbo.machine    m  ON m.MC_id      = s.MC_id
+      LEFT JOIN dbo.machine m ON m.MC_id = s.MC_id
+      LEFT JOIN dbo.op_station st
+        ON st.op_sta_id = COALESCE(s.op_sta_id, m.op_sta_id)
       OUTER APPLY (
         SELECT TOP 1 d.lot_no
         FROM ${SAFE_TKDETAIL} d WITH (NOLOCK)
@@ -175,6 +197,7 @@ exports.listAllActiveOpScans = async (req, res) => {
       ) td
       WHERE s.op_sc_ts IS NOT NULL
         AND s.op_sc_finish_ts IS NULL
+        ${isOperator ? "AND COALESCE(LTRIM(RTRIM(s.op_sta_id)), LTRIM(RTRIM(m.op_sta_id))) = @op_sta_id" : ""}
       ORDER BY s.op_sc_ts DESC
     `);
 
@@ -240,44 +263,34 @@ exports.getOpScanById = async (req, res) => {
 
 
 exports.getActiveOpScanByTkId = async (req, res) => {
-  const actor = actorOf(req);
-  const tk_id = String(req.params.tk_id || req.params.id || "").trim();
-  if (!tk_id) return res.status(400).json({ message: "tk_id is required", actor });
-
+  const isOperator = actor.role === "operator";
+const opSta = actor.op_sta_id ? String(actor.op_sta_id).trim() : "";
+if (isOperator && !opSta) return res.status(400).json({ message: "Missing op_sta_id in token", actor });
   try {
-    const pool = await getPool();
-    const r = await pool
-      .request()
-      .input("tk_id", sql.VarChar(20), tk_id)
-      .query(`
-        SELECT TOP 1
-          s.op_sc_id,
-          s.tk_id,
-          s.op_sta_id,
-          st.op_sta_name,
-          s.MC_id,
-          m.MC_name,
-          s.u_id,
-          s.op_sc_total_qty,
-          s.op_sc_scrap_qty,
-          s.op_sc_good_qty,
-          s.tf_rs_code,
-          lot_latest.lot_no,
-          s.op_sc_ts,
-          s.op_sc_finish_ts
-        FROM ${SAFE_OPSCAN} s WITH (NOLOCK)
-        LEFT JOIN dbo.op_station st ON st.op_sta_id = s.op_sta_id
-        LEFT JOIN dbo.machine    m  ON m.MC_id      = s.MC_id
-        OUTER APPLY (
-          SELECT TOP 1 d.lot_no
-          FROM ${SAFE_TKDETAIL} d WITH (NOLOCK)
-          WHERE d.tk_id = s.tk_id
-          ORDER BY d.tk_created_at_ts DESC
-        ) lot_latest
-        WHERE s.tk_id = @tk_id
-          AND s.op_sc_finish_ts IS NULL
-        ORDER BY s.op_sc_ts DESC
-      `);
+    const rq = pool.request().input("tk_id", sql.VarChar(20), tk_id);
+if (isOperator) rq.input("op_sta_id", sql.VarChar(20), opSta);
+
+const r = await rq.query(`
+  SELECT TOP 1
+    s.op_sc_id, s.tk_id, s.MC_id, s.u_id,
+    s.op_sta_id,
+    s.op_sc_total_qty, s.op_sc_scrap_qty, s.op_sc_good_qty,
+    s.tf_rs_code,
+    lot_latest.lot_no AS lot_no,
+    s.op_sc_ts, s.op_sc_finish_ts
+  FROM ${SAFE_OPSCAN} s WITH (NOLOCK)
+  LEFT JOIN dbo.machine m ON m.MC_id = s.MC_id
+  OUTER APPLY (
+    SELECT TOP 1 d.lot_no
+    FROM ${SAFE_TKDETAIL} d WITH (NOLOCK)
+    WHERE d.tk_id = s.tk_id
+    ORDER BY d.tk_created_at_ts DESC
+  ) lot_latest
+  WHERE s.tk_id = @tk_id
+    AND s.op_sc_finish_ts IS NULL
+    ${isOperator ? "AND COALESCE(LTRIM(RTRIM(s.op_sta_id)), LTRIM(RTRIM(m.op_sta_id))) = @op_sta_id" : ""}
+  ORDER BY s.op_sc_ts DESC
+`);
 
     const row = r.recordset?.[0];
     if (!row) return res.json({ actor, tk_id, active: false, item: null });
@@ -453,7 +466,8 @@ exports.getTkSummary = async (req, res) => {
 };
 
 exports.startOpScan = async (req, res) => {
-  const actor = actorOf(req);
+const actor = actorOf(req);              
+const op_sta_id = actor.op_sta_id;
 
   if (actor.u_type !== "op") return forbid(res, "Forbidden: u_type must be op", actor);
   if (actor.clientType !== "HH") return forbid(res, "Forbidden: clientType must be HH", actor);
@@ -666,22 +680,27 @@ if (lastFinishedSta) {
 
       // 8) INSERT op_scan
       await new sql.Request(tx)
-        .input("op_sc_id",  sql.Char(12),     op_sc_id)
-        .input("tk_id",     sql.VarChar(20),  tk_id)
-        .input("op_sta_id", sql.VarChar(20),  actor.op_sta_id ?? null)
-        .input("MC_id",     sql.VarChar(10),  MC_id)
-        .input("u_id",      sql.Int,          Number(actor.u_id))
-        .input("lot_no",    sql.NVarChar(300), lot_no)
-        .input("op_sc_ts",  sql.DateTime2(3), now)
-        .query(`
-          INSERT INTO ${SAFE_OPSCAN}
-            (op_sc_id, tk_id, op_sta_id, MC_id, u_id,
-             op_sc_total_qty, op_sc_scrap_qty, op_sc_good_qty,
-             tf_rs_code, lot_no, op_sc_ts, op_sc_finish_ts)
-          VALUES
-            (@op_sc_id, @tk_id, @op_sta_id, @MC_id, @u_id,
-             0, 0, 0, NULL, @lot_no, @op_sc_ts, NULL)
-        `);
+  .input("op_sc_id", sql.Char(12), op_sc_id)
+  .input("tk_id", sql.VarChar(20), tk_id)
+  .input("op_sta_id", sql.VarChar(20), op_sta_id)   // ✅ เพิ่ม
+  .input("MC_id", sql.VarChar(10), MC_id)
+  .input("u_id", sql.Int, Number(actor.u_id))
+  .input("lot_no", sql.NVarChar(300), lot_no)
+  .input("op_sc_ts", sql.DateTime2(3), now)
+  .query(`
+    INSERT INTO ${SAFE_OPSCAN}
+      (op_sc_id, tk_id, op_sta_id, MC_id, u_id,
+       op_sc_total_qty, op_sc_scrap_qty, op_sc_good_qty,
+       tf_rs_code,
+       lot_no,
+       op_sc_ts, op_sc_finish_ts)
+    VALUES
+      (@op_sc_id, @tk_id, @op_sta_id, @MC_id, @u_id,
+       0, 0, 0,
+       NULL,
+       @lot_no,
+       @op_sc_ts, NULL)
+  `);
 
      // 9) update TKHead tk_status = 3 (IN_PROGRESS)
 await new sql.Request(tx)

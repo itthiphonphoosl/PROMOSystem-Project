@@ -149,17 +149,25 @@ exports.createTkDoc = async (req, res) => {
         `[TKDOC_CREATE] tk_id=${tk_id} part_no=${partRow.part_no} created_by_u_id=${actor.u_id}`
       );
 
-      return res.status(201).json({
-        message:     "Created TK document",
-        id:          tk_id,
-        run_no,
-        lot_no,
-        MC_id:       null,
-        MC_name:     null,
-        op_sta_id:   null,
-        op_sta_name: null,
-        created_at:  now.toISOString(),
-      });
+     return res.status(201).json({
+  message: "Created TK document",
+  id: tk_id,
+
+  // ✅ เพิ่มให้ตอบออกมาครบตามที่คุณต้องการ
+  part_id: Number(partRow.part_id),
+  part_no: partRow.part_no,
+  part_name: partRow.part_name,
+
+  run_no,
+  lot_no,
+
+  MC_id: null,
+  MC_name: null,
+  op_sta_id: null,
+  op_sta_name: null,
+
+  created_at: now.toISOString(),
+});
     } catch (e) {
       await tx.rollback();
       throw e;
