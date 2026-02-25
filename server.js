@@ -11,6 +11,7 @@ const stationRoutes = require("./routes/station.routes");
 const machineRoutes = require("./routes/machine.routes");
 const transferRoutes = require("./routes/transfers.routes");
 const tkDocRoutes = require("./routes/tk_document.routes");
+const partRoutes = require("./routes/part.routes");
 
 // DB
 const { getPool } = require("./config/db");
@@ -29,7 +30,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api", userRoutes);
 app.use("/api", stationRoutes);
 app.use("/api", machineRoutes);
-
+app.use("/api", partRoutes);
 // Feature routes
 app.use("/api/transfers", transferRoutes);
 app.use("/api", tkDocRoutes);
