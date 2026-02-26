@@ -263,42 +263,92 @@ exports.getOpScanById = async (req, res) => {
 
 
 exports.getActiveOpScanByTkId = async (req, res) => {
-  const isOperator = actor.role === "operator";
-const opSta = actor.op_sta_id ? String(actor.op_sta_id).trim() : "";
-if (isOperator && !opSta) return res.status(400).json({ message: "Missing op_sta_id in token", actor });
+  // ✅ ต้องประกาศ actor ก่อนใช้งาน
+  const actor =
+    (typeof actorOf === "function" && actorOf(req)) || {
+      u_id: req.user?.u_id ?? null,
+      u_name: req.user?.u_name ?? "unknown",
+      role: req.user?.role ?? "unknown",
+      u_type: req.user?.u_type ?? null,
+      op_sta_id: req.user?.op_sta_id ?? null,
+      op_sta_name: req.user?.op_sta_name ?? null,
+      clientType: req.user?.clientType ?? null,
+    };
+
+  // ✅ ดึง tk_id จาก params ให้ถูก (รองรับหลายชื่อ)
+  const tk_id = String(
+    req.params.tk_id || req.params.tkId || req.params.id || ""
+  ).trim();
+
+  if (!tk_id) {
+    return res.status(400).json({ message: "tk_id is required", actor });
+  }
+
+  // ✅ operator ต้องถูกกรองตาม station ที่ login มา
+  const isOperator = actor.role === "operator" || actor.u_type === "op";
+  const opSta = actor.op_sta_id ? String(actor.op_sta_id).trim() : "";
+
+  if (isOperator && !opSta) {
+    return res
+      .status(400)
+      .json({ message: "Missing op_sta_id in token", actor });
+  }
+
   try {
+    // ✅ ต้องมี pool ก่อน
+    const pool = await getPool();
+
     const rq = pool.request().input("tk_id", sql.VarChar(20), tk_id);
-if (isOperator) rq.input("op_sta_id", sql.VarChar(20), opSta);
+    if (isOperator) rq.input("op_sta_id", sql.VarChar(20), opSta);
 
-const r = await rq.query(`
-  SELECT TOP 1
-    s.op_sc_id, s.tk_id, s.MC_id, s.u_id,
-    s.op_sta_id,
-    s.op_sc_total_qty, s.op_sc_scrap_qty, s.op_sc_good_qty,
-    s.tf_rs_code,
-    lot_latest.lot_no AS lot_no,
-    s.op_sc_ts, s.op_sc_finish_ts
-  FROM ${SAFE_OPSCAN} s WITH (NOLOCK)
-  LEFT JOIN dbo.machine m ON m.MC_id = s.MC_id
-  OUTER APPLY (
-    SELECT TOP 1 d.lot_no
-    FROM ${SAFE_TKDETAIL} d WITH (NOLOCK)
-    WHERE d.tk_id = s.tk_id
-    ORDER BY d.tk_created_at_ts DESC
-  ) lot_latest
-  WHERE s.tk_id = @tk_id
-    AND s.op_sc_finish_ts IS NULL
-    ${isOperator ? "AND COALESCE(LTRIM(RTRIM(s.op_sta_id)), LTRIM(RTRIM(m.op_sta_id))) = @op_sta_id" : ""}
-  ORDER BY s.op_sc_ts DESC
-`);
+    const r = await rq.query(`
+      SELECT TOP 1
+        s.op_sc_id,
+        s.tk_id,
+        COALESCE(s.op_sta_id, m.op_sta_id) AS op_sta_id,
+        st.op_sta_name,
+        s.MC_id,
+        m.MC_name,
+        s.u_id,
+        s.op_sc_total_qty,
+        s.op_sc_scrap_qty,
+        s.op_sc_good_qty,
+        s.tf_rs_code,
+        lot_latest.lot_no AS lot_no,
+        s.op_sc_ts,
+        s.op_sc_finish_ts
+      FROM ${SAFE_OPSCAN} s WITH (NOLOCK)
+      LEFT JOIN dbo.machine m ON m.MC_id = s.MC_id
+      LEFT JOIN dbo.op_station st ON st.op_sta_id = COALESCE(s.op_sta_id, m.op_sta_id)
+      OUTER APPLY (
+        SELECT TOP 1 d.lot_no
+        FROM ${SAFE_TKDETAIL} d WITH (NOLOCK)
+        WHERE d.tk_id = s.tk_id
+        ORDER BY d.tk_created_at_ts DESC
+      ) lot_latest
+      WHERE s.tk_id = @tk_id
+        AND s.op_sc_ts IS NOT NULL
+        AND s.op_sc_finish_ts IS NULL
+        ${
+          isOperator
+            ? "AND COALESCE(LTRIM(RTRIM(s.op_sta_id)), LTRIM(RTRIM(m.op_sta_id))) = @op_sta_id"
+            : ""
+        }
+      ORDER BY s.op_sc_ts DESC
+    `);
 
-    const row = r.recordset?.[0];
-    if (!row) return res.json({ actor, tk_id, active: false, item: null });
+    const row = r.recordset?.[0] || null;
+
+    if (!row) {
+      return res.json({ actor, tk_id, active: false, item: null });
+    }
 
     return res.json({ actor, tk_id, active: true, item: row });
   } catch (err) {
-    console.error("[OPSCAN_ACTIVE][ERROR]", err);
-    return res.status(500).json({ message: "Get active failed", actor, error: err.message });
+    console.error("[OPSCAN_ACTIVE_BY_TK][ERROR]", err);
+    return res
+      .status(500)
+      .json({ message: "Get active failed", actor, error: err.message });
   }
 };
 
@@ -401,7 +451,17 @@ exports.getTkSummary = async (req, res) => {
            OR t.to_tk_id   = @tk_id
         ORDER BY t.transfer_ts ASC
       `);
+const baseLotR = await pool.request()
+  .input("tk_id", sql.VarChar(20), tk_id)
+  .query(`
+    SELECT TOP 1 run_no, lot_no
+    FROM dbo.TKRunLog WITH (NOLOCK)
+    WHERE tk_id = @tk_id
+    ORDER BY created_at_ts ASC
+  `);
 
+const base_lot_no = baseLotR.recordset?.[0]?.lot_no ?? null;
+const base_run_no = baseLotR.recordset?.[0]?.run_no ? String(baseLotR.recordset[0].run_no).trim() : null;
     // 5) คำนวณ summary qty
     const scans       = scanR.recordset   || [];
     const transfers   = transferR.recordset || [];
@@ -435,15 +495,18 @@ exports.getTkSummary = async (req, res) => {
         ? new Date(head.tk_created_at_ts).toISOString()
         : null,
 
-      // ชิ้นส่วนปัจจุบัน
+         base: {
+    run_no: base_run_no,
+    lot_no: base_lot_no,
+  },
       current: detail ? {
-        lot_no:    detail.lot_no,
-        part_id:   detail.part_id,
-        part_no:   detail.part_no,
-        part_name: detail.part_name,
-        MC_id:     detail.MC_id,
-        op_sta_id: detail.op_sta_id,
-      } : null,
+    lot_no:    detail.lot_no,
+    part_id:   detail.part_id,
+    part_no:   detail.part_no,
+    part_name: detail.part_name,
+    MC_id:     detail.MC_id,
+    op_sta_id: detail.op_sta_id,
+  } : null,
 
       // สรุปรวม
       summary: {
@@ -466,12 +529,13 @@ exports.getTkSummary = async (req, res) => {
 };
 
 exports.startOpScan = async (req, res) => {
-const actor = actorOf(req);              
-const op_sta_id = actor.op_sta_id;
+  const actor = actorOf(req);
+  const op_sta_id = actor.op_sta_id ? String(actor.op_sta_id).trim() : "";
 
   if (actor.u_type !== "op") return forbid(res, "Forbidden: u_type must be op", actor);
   if (actor.clientType !== "HH") return forbid(res, "Forbidden: clientType must be HH", actor);
   if (!actor.u_id) return res.status(401).json({ message: "Unauthorized", actor });
+  if (!op_sta_id) return res.status(400).json({ message: "Missing op_sta_id in token", actor });
 
   const tk_id = String(req.body.tk_id || "").trim();
   const MC_id = String(req.body.MC_id || "").trim();
@@ -480,7 +544,7 @@ const op_sta_id = actor.op_sta_id;
   if (!MC_id) return res.status(400).json({ message: "MC_id is required", actor });
 
   console.log(
-    `[OPSCAN_START][REQ] u_id=${actor.u_id} u_name=${actor.u_name} op_sta_id=${actor.op_sta_id ?? "-"} tk_id=${tk_id} MC_id=${MC_id}`
+    `[OPSCAN_START][REQ] u_id=${actor.u_id} u_name=${actor.u_name} op_sta_id=${op_sta_id} tk_id=${tk_id} MC_id=${MC_id}`
   );
 
   try {
@@ -491,49 +555,72 @@ const op_sta_id = actor.op_sta_id;
     try {
       const now = new Date();
 
-      // 1) lock tkdetail + ดึง lot_no ปัจจุบัน
-     // 1) lock tkdetail + ดึง lot_no ปัจจุบัน
-const tkDetailR = await new sql.Request(tx)
-  .input("tk_id", sql.VarChar(20), tk_id)
-  .query(`
-    SELECT TOP 1
-      d.tk_id,
-      d.part_id,
-      p.part_no,
-      p.part_name,
-      d.lot_no,
-      d.tk_status,
-      d.tk_created_at_ts
-    FROM ${SAFE_TKDETAIL} d WITH (UPDLOCK, HOLDLOCK)
-    LEFT JOIN dbo.part p ON p.part_id = d.part_id
-    WHERE d.tk_id = @tk_id
-    ORDER BY d.tk_created_at_ts DESC
-  `);
+      // ✅ Hard lock: ถ้า TKHead เป็น FINISHED แล้ว (tk_status=1) ห้าม start
+      const headR = await new sql.Request(tx)
+        .input("tk_id", sql.VarChar(20), tk_id)
+        .query(`
+          SELECT TOP 1 tk_status
+          FROM dbo.TKHead WITH (NOLOCK)
+          WHERE tk_id = @tk_id
+        `);
 
-const tkDoc = tkDetailR.recordset?.[0];
-if (!tkDoc) {
-  await tx.rollback();
-  return res.status(404).json({ message: "tk_id not found", actor, tk_id });
-}
+      const headStatus = Number(headR.recordset?.[0]?.tk_status ?? -1);
+      if (headStatus === 1) {
+        await tx.rollback();
+        return res.status(403).json({
+          message: "This tk_id is FINISHED (STA007 completed). Cannot start new scan.",
+          actor,
+          tk_id,
+          tk_status: headStatus,
+        });
+      }
 
-// ✅ เพิ่ม — ดึง lot ทั้งหมดที่ active จาก TKRunLog
-const allLotsR = await new sql.Request(tx)
-  .input("tk_id", sql.VarChar(20), tk_id)
-  .query(`
-    SELECT
-      r.run_no,
-      r.lot_no,
-      p.part_no,
-      p.part_name,
-      r.created_at_ts
-    FROM dbo.TKRunLog r WITH (NOLOCK)
-    LEFT JOIN dbo.part p ON p.part_id = r.part_id
-    WHERE r.tk_id = @tk_id
-    ORDER BY r.created_at_ts DESC
-  `);
+      // 1) lock tkdetail + ดึงข้อมูลล่าสุด
+      const tkDetailR = await new sql.Request(tx)
+        .input("tk_id", sql.VarChar(20), tk_id)
+        .query(`
+          SELECT TOP 1
+            d.tk_id,
+            d.part_id,
+            p.part_no,
+            p.part_name,
+            d.lot_no,
+            d.tk_status,
+            d.tk_created_at_ts
+          FROM ${SAFE_TKDETAIL} d WITH (UPDLOCK, HOLDLOCK)
+          LEFT JOIN dbo.part p ON p.part_id = d.part_id
+          WHERE d.tk_id = @tk_id
+          ORDER BY d.tk_created_at_ts DESC
+        `);
 
-const allLots = allLotsR.recordset || [];
-      // 2) เช็ค STA007 finished
+      const tkDoc = tkDetailR.recordset?.[0];
+      if (!tkDoc) {
+        await tx.rollback();
+        return res.status(404).json({ message: "tk_id not found", actor, tk_id });
+      }
+
+      // ✅ ดึง runlog ทั้งหมด (ไว้ใช้ทั้ง current_lots และ base_lot_no)
+      const allLotsR = await new sql.Request(tx)
+        .input("tk_id", sql.VarChar(20), tk_id)
+        .query(`
+          SELECT
+            r.run_no,
+            r.lot_no,
+            p.part_no,
+            p.part_name,
+            r.created_at_ts
+          FROM dbo.TKRunLog r WITH (NOLOCK)
+          LEFT JOIN dbo.part p ON p.part_id = r.part_id
+          WHERE r.tk_id = @tk_id
+          ORDER BY r.created_at_ts DESC
+        `);
+
+      const allLots = allLotsR.recordset || [];
+      const baseLotRow = allLots.length ? allLots[allLots.length - 1] : null; // เพราะ query DESC
+      const base_lot_no = baseLotRow?.lot_no ? String(baseLotRow.lot_no).trim() : null;
+      const base_run_no = baseLotRow?.run_no ? String(baseLotRow.run_no).trim() : null;
+
+      // 2) เช็ค STA007 finished แบบ op_scan (กันข้อมูลเก่า/กรณีไม่ sync)
       const finishedR = await new sql.Request(tx)
         .input("tk_id", sql.VarChar(20), tk_id)
         .query(`
@@ -543,7 +630,6 @@ const allLots = allLotsR.recordset || [];
             AND op_sta_id         = 'STA007'
             AND op_sc_finish_ts IS NOT NULL
         `);
-
       if (finishedR.recordset?.[0]) {
         await tx.rollback();
         return res.status(403).json({
@@ -553,67 +639,63 @@ const allLots = allLotsR.recordset || [];
         });
       }
 
-        //ห้ามย้อน STATION เดิมที่เคย finish ไปแล้วจ้า
+      // 3) ห้ามย้อน/ซ้ำ station ที่เคย finish แล้ว
+      //    ✅ แต่ “เอกสารใหม่” (ยังไม่เคย finish) จะไม่เข้า if นี้ => เริ่มที่ไหนก็ได้
       const lastFinishedStaR = await new sql.Request(tx)
-  .input("tk_id", sql.VarChar(20), tk_id)
-  .query(`
-    SELECT TOP 1 
-      s.op_sta_id,
-      st.op_sta_name        -- ✅ เพิ่ม
-    FROM ${SAFE_OPSCAN} s WITH (NOLOCK)
-    LEFT JOIN dbo.op_station st ON st.op_sta_id = s.op_sta_id
-    WHERE s.tk_id             = @tk_id
-      AND s.op_sc_finish_ts IS NOT NULL
-      AND s.op_sta_id        IS NOT NULL
-    ORDER BY s.op_sc_finish_ts DESC
-  `);
+        .input("tk_id", sql.VarChar(20), tk_id)
+        .query(`
+          SELECT TOP 1 
+            s.op_sta_id,
+            st.op_sta_name
+          FROM ${SAFE_OPSCAN} s WITH (NOLOCK)
+          LEFT JOIN dbo.op_station st ON st.op_sta_id = s.op_sta_id
+          WHERE s.tk_id             = @tk_id
+            AND s.op_sc_finish_ts IS NOT NULL
+            AND s.op_sta_id        IS NOT NULL
+          ORDER BY s.op_sc_finish_ts DESC
+        `);
 
-const lastFinishedSta     = lastFinishedStaR.recordset?.[0]?.op_sta_id   ?? null;
-const lastFinishedStaName = lastFinishedStaR.recordset?.[0]?.op_sta_name ?? null;
+      const lastFinishedSta = lastFinishedStaR.recordset?.[0]?.op_sta_id ?? null;
+      const lastFinishedStaName = lastFinishedStaR.recordset?.[0]?.op_sta_name ?? null;
 
-if (lastFinishedSta) {
-  const staNum     = (sta) => parseInt(String(sta).replace("STA", ""), 10);
-  const lastNum    = staNum(lastFinishedSta);
-  const currentNum = staNum(actor.op_sta_id);
+      if (lastFinishedSta) {
+        const staNum = (sta) => parseInt(String(sta).replace("STA", ""), 10);
+        const lastNum = staNum(lastFinishedSta);
+        const currentNum = staNum(op_sta_id);
 
-  if (currentNum <= lastNum) {
+        // ✅ กติกาใหม่: ทำได้ทุก station ที่ “มากกว่า” last finished (ข้ามได้)
+        if (Number.isFinite(lastNum) && Number.isFinite(currentNum) && currentNum <= lastNum) {
+          const nextStaR = await new sql.Request(tx)
+            .input("lastNum", sql.Int, lastNum)
+            .query(`
+              SELECT TOP 1 op_sta_id, op_sta_name
+              FROM dbo.op_station
+              WHERE CAST(REPLACE(op_sta_id, 'STA', '') AS INT) > @lastNum
+                AND op_sta_active = 1
+              ORDER BY CAST(REPLACE(op_sta_id, 'STA', '') AS INT) ASC
+            `);
 
-    // ✅ query หา station ถัดไปจาก op_station
-    const nextStaR = await new sql.Request(tx)
-      .input("lastNum", sql.Int, lastNum)
-      .query(`
-        SELECT TOP 1
-          op_sta_id,
-          op_sta_name
-        FROM dbo.op_station
-        WHERE CAST(REPLACE(op_sta_id, 'STA', '') AS INT) > @lastNum
-          AND op_sta_active = 1
-        ORDER BY CAST(REPLACE(op_sta_id, 'STA', '') AS INT) ASC
-      `);
-
-    const nextSta = nextStaR.recordset?.[0] ?? null;
-
-    await tx.rollback();
-    return res.status(403).json({
-      message: nextSta
-        ? `tk_id นี้ผ่าน ${lastFinishedSta} (${lastFinishedStaName}) มาแล้ว กรุณานำถาดไปดำเนินการที่ ${nextSta.op_sta_id} (${nextSta.op_sta_name})`
-        : `tk_id นี้ผ่าน ${lastFinishedSta} (${lastFinishedStaName}) มาแล้ว ไม่มี Station ถัดไป`,
-      actor,
-      tk_id,
-      last_finished_sta:      lastFinishedSta,
-      last_finished_sta_name: lastFinishedStaName,
-      next_sta:               nextSta?.op_sta_id   ?? null,
-      next_sta_name:          nextSta?.op_sta_name ?? null,
-    });
-  }
-}
+          const nextSta = nextStaR.recordset?.[0] ?? null;
+          await tx.rollback();
+          return res.status(403).json({
+            message: nextSta
+              ? `tk_id นี้ทำถึง ${lastFinishedSta} (${lastFinishedStaName}) แล้ว ❌ ห้ามเริ่มที่ ${op_sta_id} เพราะย้อน/ซ้ำ ✅ ให้ไปเริ่มที่ ${nextSta.op_sta_id} (${nextSta.op_sta_name}) หรือ station ที่มากกว่านั้น`
+              : `tk_id นี้ทำถึง ${lastFinishedSta} (${lastFinishedStaName}) แล้ว และไม่มี Station ถัดไป`,
+            actor,
+            tk_id,
+            last_finished_sta: lastFinishedSta,
+            last_finished_sta_name: lastFinishedStaName,
+            suggested_next_sta: nextSta?.op_sta_id ?? null,
+            suggested_next_sta_name: nextSta?.op_sta_name ?? null,
+          });
+        }
+      }
 
       const lot_no = tkDoc.lot_no || null;
 
-      // 4) validate machine
+      // 4) validate machine (ต้องอยู่ station เดียวกับที่ login)
       const mcR = await new sql.Request(tx)
-        .input("MC_id",     sql.VarChar(10), MC_id)
-        .input("op_sta_id", sql.VarChar(20), actor.op_sta_id ?? null)
+        .input("MC_id", sql.VarChar(10), MC_id)
         .query(`
           SELECT TOP 1 MC_id, MC_name, op_sta_id
           FROM ${SAFE_MACHINE} WITH (NOLOCK)
@@ -622,20 +704,18 @@ if (lastFinishedSta) {
         `);
 
       const mcRow = mcR.recordset?.[0];
-
       if (!mcRow) {
         await tx.rollback();
         return res.status(400).json({ message: "MC_id not found or inactive", actor, MC_id });
       }
-
-      if (mcRow.op_sta_id !== actor.op_sta_id) {
+      if (String(mcRow.op_sta_id || "").trim() !== op_sta_id) {
         await tx.rollback();
         return res.status(403).json({
-          message:           `Machine ${MC_id} does not belong to your station (${actor.op_sta_id}). Machine is in ${mcRow.op_sta_id ?? "no station"}.`,
+          message: `Machine ${MC_id} does not belong to your station (${op_sta_id}). Machine is in ${mcRow.op_sta_id ?? "no station"}.`,
           actor,
           MC_id,
           machine_op_sta_id: mcRow.op_sta_id ?? null,
-          your_op_sta_id:    actor.op_sta_id ?? null,
+          your_op_sta_id: op_sta_id,
         });
       }
 
@@ -643,7 +723,7 @@ if (lastFinishedSta) {
       const activeR = await new sql.Request(tx)
         .input("tk_id", sql.VarChar(20), tk_id)
         .query(`
-          SELECT TOP 1 op_sc_id
+          SELECT TOP 1 op_sc_id, op_sta_id
           FROM ${SAFE_OPSCAN} WITH (UPDLOCK, HOLDLOCK)
           WHERE tk_id             = @tk_id
             AND op_sc_finish_ts IS NULL
@@ -653,22 +733,23 @@ if (lastFinishedSta) {
       if (activeR.recordset?.[0]) {
         await tx.rollback();
         return res.status(409).json({
-          message:  "This tk_id already has an active scan (not finished yet)",
+          message: "This tk_id already has an active scan (not finished yet)",
           actor,
           tk_id,
           op_sc_id: activeR.recordset[0].op_sc_id,
+          scan_op_sta_id: activeR.recordset[0].op_sta_id ?? null,
         });
       }
 
-      // 6) gen op_sc_id ✅ ต้องก่อน UPDATE TKDetail
+      // 6) gen op_sc_id
       const op_sc_id = await genOpScId(tx, now);
 
-      // 7) update TKDetail ✅ ใช้ op_sc_id ที่ gen แล้ว
+      // 7) update TKDetail
       await new sql.Request(tx)
-        .input("tk_id",    sql.VarChar(20), tk_id)
-        .input("MC_id",    sql.VarChar(10), MC_id)
-        .input("op_sta_id",sql.VarChar(20), actor.op_sta_id ?? null)
-        .input("op_sc_id", sql.Char(12),    op_sc_id)
+        .input("tk_id", sql.VarChar(20), tk_id)
+        .input("MC_id", sql.VarChar(10), MC_id)
+        .input("op_sta_id", sql.VarChar(20), op_sta_id)
+        .input("op_sc_id", sql.Char(12), op_sc_id)
         .query(`
           UPDATE ${SAFE_TKDETAIL}
           SET
@@ -678,83 +759,90 @@ if (lastFinishedSta) {
           WHERE tk_id = @tk_id
         `);
 
-      // 8) INSERT op_scan
+      // 8) INSERT op_scan (สำคัญ: เก็บ op_sta_id ไว้เพื่อ Station lock ตอน finish)
       await new sql.Request(tx)
-  .input("op_sc_id", sql.Char(12), op_sc_id)
-  .input("tk_id", sql.VarChar(20), tk_id)
-  .input("op_sta_id", sql.VarChar(20), op_sta_id)   // ✅ เพิ่ม
-  .input("MC_id", sql.VarChar(10), MC_id)
-  .input("u_id", sql.Int, Number(actor.u_id))
-  .input("lot_no", sql.NVarChar(300), lot_no)
-  .input("op_sc_ts", sql.DateTime2(3), now)
-  .query(`
-    INSERT INTO ${SAFE_OPSCAN}
-      (op_sc_id, tk_id, op_sta_id, MC_id, u_id,
-       op_sc_total_qty, op_sc_scrap_qty, op_sc_good_qty,
-       tf_rs_code,
-       lot_no,
-       op_sc_ts, op_sc_finish_ts)
-    VALUES
-      (@op_sc_id, @tk_id, @op_sta_id, @MC_id, @u_id,
-       0, 0, 0,
-       NULL,
-       @lot_no,
-       @op_sc_ts, NULL)
-  `);
+        .input("op_sc_id", sql.Char(12), op_sc_id)
+        .input("tk_id", sql.VarChar(20), tk_id)
+        .input("op_sta_id", sql.VarChar(20), op_sta_id)
+        .input("MC_id", sql.VarChar(10), MC_id)
+        .input("u_id", sql.Int, Number(actor.u_id))
+        .input("lot_no", sql.NVarChar(300), lot_no)
+        .input("op_sc_ts", sql.DateTime2(3), now)
+        .query(`
+          INSERT INTO ${SAFE_OPSCAN}
+            (op_sc_id, tk_id, op_sta_id, MC_id, u_id,
+             op_sc_total_qty, op_sc_scrap_qty, op_sc_good_qty,
+             tf_rs_code,
+             lot_no,
+             op_sc_ts, op_sc_finish_ts)
+          VALUES
+            (@op_sc_id, @tk_id, @op_sta_id, @MC_id, @u_id,
+             0, 0, 0,
+             NULL,
+             @lot_no,
+             @op_sc_ts, NULL)
+        `);
 
-     // 9) update TKHead tk_status = 3 (IN_PROGRESS)
-await new sql.Request(tx)
-  .input("tk_id", sql.VarChar(20), tk_id)
-  .query(`
-    UPDATE dbo.TKHead
-    SET tk_status = 3
-    WHERE tk_id     = @tk_id
-      AND tk_status = 0
-  `);
+      // ✅ 9) tk_status = 3 ทุกครั้งที่ start ได้ (ยกเว้น finished=1)
+      await new sql.Request(tx)
+        .input("tk_id", sql.VarChar(20), tk_id)
+        .query(`
+          UPDATE dbo.TKHead
+          SET tk_status = 3
+          WHERE tk_id = @tk_id
+            AND tk_status <> 1
+        `);
 
-// ✅ sync tk_status = 3 ลง TKDetail ด้วย
-await new sql.Request(tx)
-  .input("tk_id", sql.VarChar(20), tk_id)
-  .query(`
-    UPDATE ${SAFE_TKDETAIL}
-    SET tk_status = 3
-    WHERE tk_id     = @tk_id
-      AND tk_status = 0
-  `);
+      await new sql.Request(tx)
+        .input("tk_id", sql.VarChar(20), tk_id)
+        .query(`
+          UPDATE ${SAFE_TKDETAIL}
+          SET tk_status = 3
+          WHERE tk_id = @tk_id
+            AND tk_status <> 1
+        `);
+
       await tx.commit();
 
       console.log(
-        `[OPSCAN_START][OK] op_sc_id=${op_sc_id} tk_id=${tk_id} op_sta_id=${actor.op_sta_id ?? "-"} MC_id=${MC_id} lot_no=${lot_no ?? "-"} u_id=${actor.u_id}`
+        `[OPSCAN_START][OK] op_sc_id=${op_sc_id} tk_id=${tk_id} op_sta_id=${op_sta_id} MC_id=${MC_id} lot_no=${lot_no ?? "-"} u_id=${actor.u_id}`
       );
 
       return res.status(201).json({
-        message:         "Started",
-        actor:           { u_id: actor.u_id, u_name: actor.u_name, role: actor.role },
+        message: "Started",
+        actor: { u_id: actor.u_id, u_name: actor.u_name, role: actor.role },
         op_sc_id,
-        op_sta_id:       actor.op_sta_id  ?? null,
-        op_sta_name:     actor.op_sta_name ?? null,
+        op_sta_id,
+        op_sta_name: actor.op_sta_name ?? null,
         MC_id,
         op_sc_total_qty: 0,
+
+        // ✅ ส่ง base_lot_no ไปให้หน้า Finish โชว์หัวข้อ "Lot No:"
+        base_lot_no,
+        base_run_no,
+
         tk_doc: {
-          tk_id:            tkDoc.tk_id,
-          lot_no:           tkDoc.lot_no,
-          part_id:          tkDoc.part_id,
-          part_no:          tkDoc.part_no,
-          part_name:        tkDoc.part_name,
-          op_sta_id:        actor.op_sta_id  ?? null,
-          op_sta_name:      actor.op_sta_name ?? null,
-          tk_status:        3,
+          tk_id: tkDoc.tk_id,
+          lot_no: tkDoc.lot_no, // current lot (ล่าสุดใน TKDetail)
+          part_id: tkDoc.part_id,
+          part_no: tkDoc.part_no,
+          part_name: tkDoc.part_name,
+          op_sta_id,
+          op_sta_name: actor.op_sta_name ?? null,
+          tk_status: 3,
           tk_created_at_ts: tkDoc.tk_created_at_ts
             ? new Date(tkDoc.tk_created_at_ts).toISOString()
             : null,
+          base_lot_no,
+          base_run_no,
         },
-        current_lots: allLots.map(l => ({
-    run_no:    l.run_no ? String(l.run_no).trim() : null,
-    lot_no:    l.lot_no,
-    part_no:   l.part_no,
-    part_name: l.part_name,
-  })),
 
+        current_lots: allLots.map((l) => ({
+          run_no: l.run_no ? String(l.run_no).trim() : null,
+          lot_no: l.lot_no,
+          part_no: l.part_no,
+          part_name: l.part_name,
+        })),
       });
     } catch (e) {
       await tx.rollback();
@@ -794,7 +882,7 @@ exports.finishOpScan = async (req, res) => {
     return res.status(400).json({ message: "groups[] is required and cannot be empty", actor });
   }
 
-  // --- validate แต่ละ group ---
+  // --- validate groups ---
   for (let i = 0; i < groups.length; i++) {
     const g    = groups[i];
     const gNum = i + 1;
@@ -870,7 +958,7 @@ exports.finishOpScan = async (req, res) => {
     });
   }
 
-  // กัน from_lot_no ซ้ำข้ามกลุ่ม
+  // กัน from_lot_no ซ้ำข้ามกลุ่ม (tf=2 from_lot_no, tf=3 merge_lots)
   const allFromLots = [];
   for (const g of groups) {
     const tf = Number(g.tf_rs_code);
@@ -892,9 +980,7 @@ exports.finishOpScan = async (req, res) => {
     }
   }
 
-  const SAFE_TRANSFER = safeTableName(process.env.TRANSFER_TABLE || "dbo.t_transfer");
-  const SAFE_PART     = safeTableName(process.env.PART_TABLE     || "dbo.part");
-  const SAFE_RUNLOG   = safeTableName(process.env.TKRUNLOG_TABLE || "dbo.TKRunLog");
+  const SAFE_RUNLOG = safeTableName(process.env.TKRUNLOG_TABLE || "dbo.TKRunLog");
 
   console.log(
     `[OPSCAN_FINISH][REQ] u_id=${actor.u_id} op_sc_id=${op_sc_id} good=${Math.trunc(good_qty)} scrap=${Math.trunc(scrap_qty)} groups=${groups.length}`
@@ -904,17 +990,6 @@ exports.finishOpScan = async (req, res) => {
     const pool = await getPool();
     const tx   = new sql.Transaction(pool);
     await tx.begin(sql.ISOLATION_LEVEL.SERIALIZABLE);
-
-    const getPartByNo = async (partNo) => {
-      const r = await new sql.Request(tx)
-        .input("part_no", sql.VarChar(100), String(partNo).trim())
-        .query(`
-          SELECT TOP 1 part_id, part_no, part_name
-          FROM ${SAFE_PART} WITH (NOLOCK)
-          WHERE part_no = @part_no
-        `);
-      return r.recordset?.[0] ?? null;
-    };
 
     const lotExistsInRunLog = async (tkId, lotNo) => {
       const r = await new sql.Request(tx)
@@ -965,56 +1040,53 @@ exports.finishOpScan = async (req, res) => {
         return res.status(409).json({ message: "Already finished", actor, op_sc_id });
       }
 
-      const master_tk_id = String(row.tk_id || "").trim();
-      if (!master_tk_id) {
-        await tx.rollback();
-        return res.status(400).json({ message: "op_scan.tk_id is NULL", actor, op_sc_id });
-      }
+      // ✅ 3.1 Station lock: start ที่ station ไหน ต้อง finish station นั้นเท่านั้น
+     
+const actorSta = actor.op_sta_id ? String(actor.op_sta_id).trim() : "";
+if (!actorSta) {
+  await tx.rollback();
+  return res.status(400).json({ message: "Missing op_sta_id in token", actor, op_sc_id });
+}
 
-      // 2) เช็ค STA007 finished
-      const finishedR = await new sql.Request(tx)
-        .input("tk_id", sql.VarChar(20), master_tk_id)
-        .query(`
-          SELECT TOP 1 op_sc_id
-          FROM ${SAFE_OPSCAN} WITH (NOLOCK)
-          WHERE tk_id             = @tk_id
-            AND op_sta_id         = 'STA007'
-            AND op_sc_finish_ts IS NOT NULL
-        `);
-      if (finishedR.recordset?.[0]) {
-        await tx.rollback();
-        return res.status(403).json({
-          message: "This tk_id is already FINISHED at STA007. Cannot finish again.",
-          actor, tk_id: master_tk_id,
-        });
-      }
+const scanSta = row.op_sta_id ? String(row.op_sta_id).trim() : "";
+if (scanSta && scanSta !== actorSta) {
+  await tx.rollback();
+  return res.status(403).json({
+    message: `Forbidden: this scan started at ${scanSta} but you login as ${actorSta}`,
+    actor,
+    op_sc_id,
+    scan_op_sta_id: scanSta,
+    your_op_sta_id: actorSta,
+  });
+}
 
-      // 3) ดึง good_qty จาก station ก่อนหน้า
-      const prevScanR = await new sql.Request(tx)
-        .input("tk_id",    sql.VarChar(20), master_tk_id)
-        .input("op_sc_id", sql.Char(12),    op_sc_id)
-        .query(`
-          SELECT TOP 1 op_sc_good_qty
-          FROM ${SAFE_OPSCAN} WITH (NOLOCK)
-          WHERE tk_id             = @tk_id
-            AND op_sc_finish_ts IS NOT NULL
-            AND op_sc_id         <> @op_sc_id
-          ORDER BY op_sc_finish_ts DESC
-        `);
+const master_tk_id = String(row.tk_id || "").trim();
+if (!master_tk_id) {
+  await tx.rollback();
+  return res.status(400).json({ message: "op_scan.tk_id is NULL", actor, op_sc_id });
+}
 
-      const prevGoodQty = prevScanR.recordset?.[0]?.op_sc_good_qty ?? null;
+// ✅ ถ้า TKHead = FINISHED (1) ห้าม finish/ทำอะไรเพิ่มแล้ว
+const headR = await new sql.Request(tx)
+  .input("tk_id", sql.VarChar(20), master_tk_id)
+  .query(`
+    SELECT TOP 1 tk_status
+    FROM dbo.TKHead WITH (NOLOCK)
+    WHERE tk_id = @tk_id
+  `);
 
-      if (prevGoodQty !== null && sumGroupsQty !== Math.trunc(prevGoodQty)) {
-        await tx.rollback();
-        return res.status(400).json({
-          message:        `Sum of groups qty (${sumGroupsQty}) must equal previous station good_qty (${Math.trunc(prevGoodQty)})`,
-          actor,
-          sum_groups_qty: sumGroupsQty,
-          prev_good_qty:  Math.trunc(prevGoodQty),
-        });
-      }
+const headStatus = Number(headR.recordset?.[0]?.tk_status ?? -1);
+if (headStatus === 1) {
+  await tx.rollback();
+  return res.status(403).json({
+    message: "This tk_id is FINISHED (STA007 completed). Cannot finish again.",
+    actor,
+    tk_id: master_tk_id,
+    tk_status: headStatus,
+  });
+}
 
-      // 4) ดึง base_lot_no จาก TKDetail (กรณีไม่มี lot เดิม)
+      // 4) base_lot_no (เอา lot ปัจจุบันใน TKDetail เป็น default ถ้าไม่ส่ง from_lot_no)
       const baseDetailR = await new sql.Request(tx)
         .input("tk_id", sql.VarChar(20), master_tk_id)
         .query(`
@@ -1027,7 +1099,7 @@ exports.finishOpScan = async (req, res) => {
       const baseDetail  = baseDetailR.recordset?.[0];
       const base_lot_no = baseDetail?.lot_no ? String(baseDetail.lot_no).trim() : null;
 
-      // 5) validate from_lot_no ทุกตัว
+      // 5) validate from_lot_no ทุกตัว (ต้องมีใน TKRunLog)
       for (const g of groups) {
         const tf = Number(g.tf_rs_code);
         if (tf === 2 && g.from_lot_no) {
@@ -1056,9 +1128,9 @@ exports.finishOpScan = async (req, res) => {
         }
       }
 
-      // 6) ประมวลผลแต่ละ group
+      // 6) process groups
       const created_children = [];
-      let   first_lot_no     = null;
+      let first_lot_no = null;
 
       for (let i = 0; i < groups.length; i++) {
         const g         = groups[i];
@@ -1066,19 +1138,15 @@ exports.finishOpScan = async (req, res) => {
         const group_qty = Math.trunc(Number(g.qty));
         const gNum      = i + 1;
 
-        // ----------------------------------------------------------------
-        // tf=1 Master → 1 เข้า 1 ออก
-        // ----------------------------------------------------------------
         if (tf === 1) {
-          const outPart  = await getPartByNo(String(g.out_part_no).trim());
+          const outPart = await getPartByNo(tx, String(g.out_part_no).trim());
           if (!outPart) {
             await tx.rollback();
             return res.status(400).json({ message: `groups[${gNum}]: out_part_no "${g.out_part_no}" not found`, actor });
           }
 
-          const from_lot           = g.from_lot_no ? String(g.from_lot_no).trim() : base_lot_no;
+          const from_lot = g.from_lot_no ? String(g.from_lot_no).trim() : base_lot_no;
           const { run_no, lot_no } = await genNewLot(master_tk_id, outPart.part_id);
-
           if (!first_lot_no) first_lot_no = lot_no;
 
           await new sql.Request(tx)
@@ -1112,29 +1180,21 @@ exports.finishOpScan = async (req, res) => {
             from_lot_no: from_lot,
             lots: [{ run_no, lot_no, out_part_no: String(outPart.part_no), qty: group_qty }],
           });
-
-          console.log(`[FINISH][G${gNum}][MASTER] from=${from_lot} to=${lot_no} qty=${group_qty}`);
         }
 
-        // ----------------------------------------------------------------
-        // tf=2 Split → 1 เข้า หลายออก
-        // ----------------------------------------------------------------
         if (tf === 2) {
           const from_lot  = g.from_lot_no ? String(g.from_lot_no).trim() : base_lot_no;
           const splitLots = [];
 
           for (const s of g.splits) {
-            const outPart = await getPartByNo(String(s.out_part_no).trim());
+            const outPart = await getPartByNo(tx, String(s.out_part_no).trim());
             if (!outPart) {
               await tx.rollback();
-              return res.status(400).json({
-                message: `groups[${gNum}] split: out_part_no "${s.out_part_no}" not found`, actor,
-              });
+              return res.status(400).json({ message: `groups[${gNum}] split: out_part_no "${s.out_part_no}" not found`, actor });
             }
 
-            const s_qty              = Math.trunc(Number(s.qty));
+            const s_qty = Math.trunc(Number(s.qty));
             const { run_no, lot_no } = await genNewLot(master_tk_id, outPart.part_id);
-
             if (!first_lot_no) first_lot_no = lot_no;
 
             await new sql.Request(tx)
@@ -1165,22 +1225,16 @@ exports.finishOpScan = async (req, res) => {
             from_lot_no: from_lot,
             lots: splitLots,
           });
-
-          console.log(`[FINISH][G${gNum}][SPLIT] from=${from_lot} splits=${g.splits.length} qty=${group_qty}`);
         }
 
-        // ----------------------------------------------------------------
-        // tf=3 Co-ID → หลายเข้า 1 ออก
-        // ----------------------------------------------------------------
         if (tf === 3) {
-          const outPart = await getPartByNo(String(g.out_part_no).trim());
+          const outPart = await getPartByNo(tx, String(g.out_part_no).trim());
           if (!outPart) {
             await tx.rollback();
             return res.status(400).json({ message: `groups[${gNum}]: out_part_no "${g.out_part_no}" not found`, actor });
           }
 
           const { run_no, lot_no } = await genNewLot(master_tk_id, outPart.part_id);
-
           if (!first_lot_no) first_lot_no = lot_no;
 
           for (const m of g.merge_lots) {
@@ -1218,14 +1272,10 @@ exports.finishOpScan = async (req, res) => {
             merged_from:   g.merge_lots.map(m => ({ from_lot_no: m.from_lot_no, qty: Math.trunc(Number(m.qty)) })),
             lots: [{ run_no, lot_no, qty: group_qty }],
           });
-
-          console.log(`[FINISH][G${gNum}][COID] to_lot=${lot_no} merged=${g.merge_lots.length} qty=${group_qty}`);
         }
       }
 
       // 7) update op_scan finish
-      // ✅ tf_rs_code = group ล่าสุดที่ประมวลผล
-      // ✅ lot_no = first_lot_no (lot แรกที่ gen) รายละเอียดทั้งหมดอยู่ใน t_transfer
       const last_tf_rs_code = Number(groups[groups.length - 1].tf_rs_code);
 
       await new sql.Request(tx)
@@ -1250,33 +1300,29 @@ exports.finishOpScan = async (req, res) => {
           WHERE op_sc_id = @op_sc_id
         `);
 
-      // 8) update TKHead tk_status
-const isFinishAtSTA007 = actor.op_sta_id === "STA007";
-const newTkStatus      = isFinishAtSTA007 ? 1 : 2;
+      // 8) update TKHead / TKDetail tk_status
+      const isFinishAtSTA007 = actor.op_sta_id === "STA007";
+      const newTkStatus      = isFinishAtSTA007 ? 1 : 2;
 
-await new sql.Request(tx)
-  .input("tk_id",     sql.VarChar(20), master_tk_id)
-  .input("tk_status", sql.Int,         newTkStatus)
-  .query(`
-    UPDATE dbo.TKHead
-    SET tk_status = @tk_status
-    WHERE tk_id = @tk_id
-  `);
+      await new sql.Request(tx)
+        .input("tk_id",     sql.VarChar(20), master_tk_id)
+        .input("tk_status", sql.Int,         newTkStatus)
+        .query(`
+          UPDATE dbo.TKHead
+          SET tk_status = @tk_status
+          WHERE tk_id = @tk_id
+        `);
 
-// ✅ sync tk_status ลง TKDetail ด้วย
-await new sql.Request(tx)
-  .input("tk_id",     sql.VarChar(20), master_tk_id)
-  .input("tk_status", sql.Int,         newTkStatus)
-  .query(`
-    UPDATE ${SAFE_TKDETAIL}
-    SET tk_status = @tk_status
-    WHERE tk_id = @tk_id
-  `);
+      await new sql.Request(tx)
+        .input("tk_id",     sql.VarChar(20), master_tk_id)
+        .input("tk_status", sql.Int,         newTkStatus)
+        .query(`
+          UPDATE ${SAFE_TKDETAIL}
+          SET tk_status = @tk_status
+          WHERE tk_id = @tk_id
+        `);
+
       await tx.commit();
-
-      console.log(
-        `[OPSCAN_FINISH][OK] op_sc_id=${op_sc_id} tk_id=${master_tk_id} groups=${groups.length} tk_status=${newTkStatus} first_lot=${first_lot_no}`
-      );
 
       return res.json({
         message: "Finished",
@@ -1301,7 +1347,6 @@ await new sql.Request(tx)
         op_sc_ts:        row.op_sc_ts ? new Date(row.op_sc_ts).toISOString() : null,
         op_sc_finish_ts: now.toISOString(),
       });
-
     } catch (e) {
       await tx.rollback();
       throw e;

@@ -166,6 +166,7 @@ exports.createTkDoc = async (req, res) => {
   op_sta_id: null,
   op_sta_name: null,
 
+  // ✅ ใช้ now ได้เลย
   created_at: now.toISOString(),
 });
     } catch (e) {
