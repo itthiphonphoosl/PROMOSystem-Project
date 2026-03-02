@@ -1,50 +1,55 @@
+// routes/op_scan.routes.js
 const express = require("express");
-const router = express.Router();
+const router  = express.Router();
 
-const {
-  requireAuth,
-  requireRole,
-  requireClientType,
-} = require("../middleware/auth.middleware");
+const { requireAuth, requireRole, requireClientType } = require("../middleware/auth.middleware");
 
-const opScanController = require("../controllers/op_scan.controller");
+// ── แยก import จาก 2 controller ──
+const opScanController      = require("../controllers/op_scan.controller");        // start, finish
+const opScanQueryController = require("../controllers/op_scan_query.controller");  // GET ทั้งหมด
 
+// ── GET endpoints ── (จาก op_scan_query.controller.js)
 router.get(
   "/op-scan/active",
   requireAuth,
   requireRole(["admin", "operator"]),
   requireClientType(["PC", "HH"]),
-  opScanController.listAllActiveOpScans
+  opScanQueryController.listAllActiveOpScans
 );
+
 router.get(
   "/op-scan/active/:tk_id",
   requireAuth,
   requireRole(["admin", "operator"]),
   requireClientType(["PC", "HH"]),
-  opScanController.getActiveOpScanByTkId
+  opScanQueryController.getActiveOpScanByTkId
 );
 
+router.get(
+  "/op-scan/parked",
+  requireAuth,
+  requireRole(["admin", "operator"]),
+  requireClientType(["PC", "HH"]),
+  opScanQueryController.getParkedLots        // ← API ใหม่ ดึง Lot พักของ Station
+);
 
+router.get(
+  "/op-scan/summary/:tk_id",
+  requireAuth,
+  requireRole(["admin", "operator"]),
+  requireClientType(["PC", "HH"]),
+  opScanQueryController.getTkSummary
+);
 
 router.get(
   "/op-scan/:op_sc_id",
   requireAuth,
   requireRole(["admin", "operator"]),
   requireClientType(["PC", "HH"]),
-  opScanController.getOpScanById
+  opScanQueryController.getOpScanById
 );
 
-//ก่อน scan → HH สแกนถาด อยากรู้ว่าถาดนี้ผ่านมาจากไหนแล้ว
-// finish → ดูผลสรุปว่าตัวเองทำอะไรไปบ้าง
-//Admin ดูบน PC → ต้องการ audit trail ย้อนหลัง
-router.get(
-  "/op-scan/summary/:tk_id",
-  requireAuth,
-  requireRole(["admin", "operator"]),
-  requireClientType(["PC", "HH"]),
-  opScanController.getTkSummary
-);
-
+// ── POST endpoints ── (จาก op_scan.controller.js)
 router.post(
   "/op-scan/start",
   requireAuth,
@@ -60,6 +65,5 @@ router.post(
   requireClientType(["HH"]),
   opScanController.finishOpScan
 );
-
 
 module.exports = router;
