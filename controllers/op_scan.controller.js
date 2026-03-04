@@ -110,6 +110,29 @@ async function lotExistsInRunLog(tx, tk_id, lot_no) {
   return !!r.recordset?.[0];
 }
 
+// ── Cross-TK Parked Lot Helpers ────────────────────────────────
+// หา TK owner ของ lot จาก TKRunLog (ไม่จำกัด tk_id) — รองรับ cross-TK
+async function getLotOwnerTk(tx, lot_no) {
+  const r = await new sql.Request(tx)
+    .input("lot_no", sql.NVarChar(300), String(lot_no || "").trim())
+    .query(`SELECT TOP 1 tk_id FROM ${SAFE_RUNLOG} WITH (NOLOCK) WHERE lot_no = @lot_no`);
+  return r.recordset?.[0]?.tk_id ? String(r.recordset[0].tk_id).trim() : null;
+}
+
+// Un-park lot จาก TK อื่น (set lot_parked_status=0 บน transfer row เดิม)
+async function unParkCrossTkLot(tx, owner_tk_id, lot_no) {
+  await new sql.Request(tx)
+    .input("owner_tk_id", sql.VarChar(20),   String(owner_tk_id).trim())
+    .input("lot_no",      sql.NVarChar(300), String(lot_no).trim())
+    .query(`
+      UPDATE ${SAFE_TRANSFER}
+      SET lot_parked_status = 0
+      WHERE from_tk_id       = @owner_tk_id
+        AND to_lot_no         = @lot_no
+        AND lot_parked_status = 1
+    `);
+}
+
 // INSERT 1 row ใน t_transfer พร้อม field ใหม่ op_sta_id + lot_parked_status
 async function insertTransfer(tx, { from_tk_id, to_tk_id, from_lot_no, to_lot_no,
   tf_rs_code, transfer_qty, op_sc_id, MC_id, op_sta_id,
@@ -557,9 +580,9 @@ exports.finishOpScan = async (req, res) => {
         }
 
         for (const { lot, gLabel } of fromLotChecks) {
-          // ① ต้องมีใน TKRunLog ของ TK นี้
-          const ok = await lotExistsInRunLog(tx, master_tk_id, lot);
-          if (!ok) {
+          // ① ต้องมีใน TKRunLog (TK ใดก็ได้ — รองรับ cross-TK parked lot)
+          const lotOwnerTk = await getLotOwnerTk(tx, lot);
+          if (!lotOwnerTk) {
             await tx.rollback();
             return res.status(400).json({ message: `${gLabel}: from_lot_no "${lot}" ไม่พบใน TKRunLog`, actor });
           }
@@ -630,8 +653,14 @@ exports.finishOpScan = async (req, res) => {
             .input("part_id", sql.Int,          Number(outPart.part_id))
             .query(`UPDATE ${SAFE_TKDETAIL} SET part_id=@part_id WHERE tk_id=@tk_id`);
 
+          // ✅ Cross-TK: หา owner TK ของ from_lot — ถ้าเป็น TK อื่น ให้ un-park ก่อน
+          const fromOwnerTk_1 = (await getLotOwnerTk(tx, from_lot)) || master_tk_id;
+          if (fromOwnerTk_1 !== master_tk_id) {
+            await unParkCrossTkLot(tx, fromOwnerTk_1, from_lot);
+          }
+
           await insertTransfer(tx, {
-            from_tk_id: master_tk_id, to_tk_id: master_tk_id,
+            from_tk_id: fromOwnerTk_1, to_tk_id: master_tk_id,  // ✅ cross-TK aware
             from_lot_no: from_lot,
             to_lot_no:   from_lot,   // ✅ lot ไม่เปลี่ยน
             tf_rs_code: 1, transfer_qty: group_qty,
@@ -644,7 +673,8 @@ exports.finishOpScan = async (req, res) => {
           created_children.push({
             group: gNum, tf_rs_code: 1,
             from_lot_no: from_lot,
-            to_lot_no:   from_lot,   // ✅ same lot
+            to_lot_no:   from_lot,
+            from_tk_id:  fromOwnerTk_1,   // ✅ บอก client ว่า lot มาจาก TK ไหน
             out_part_no: outPart.part_no,
             lots: [{ lot_no: from_lot, out_part_no: outPart.part_no, qty: group_qty }],
             parked_lots: [],
@@ -656,6 +686,12 @@ exports.finishOpScan = async (req, res) => {
         if (tf === 2) {
           const from_lot = String(g.from_lot_no).trim();
           const splits   = Array.isArray(g.splits) ? g.splits : [];
+
+          // ✅ Cross-TK: หา owner TK ของ from_lot — ถ้าเป็น TK อื่น ให้ un-park ก่อน
+          const fromOwnerTk_2 = (await getLotOwnerTk(tx, from_lot)) || master_tk_id;
+          if (fromOwnerTk_2 !== master_tk_id) {
+            await unParkCrossTkLot(tx, fromOwnerTk_2, from_lot);
+          }
 
           // ✅ ใช้ group.qty จาก request โดยตรง — ไม่เช็คกับ DB
           const group_qty_tf2 = Math.trunc(Number(g.qty));
@@ -675,7 +711,7 @@ exports.finishOpScan = async (req, res) => {
             if (!first_lot_no) first_lot_no = lot_no;
 
             await insertTransfer(tx, {
-              from_tk_id: master_tk_id, to_tk_id: master_tk_id,
+              from_tk_id: fromOwnerTk_2, to_tk_id: master_tk_id,  // ✅ cross-TK aware
               from_lot_no: from_lot, to_lot_no: lot_no,
               tf_rs_code: 2, transfer_qty: s_qty,
               op_sc_id, MC_id: MC_id_val,
@@ -688,9 +724,9 @@ exports.finishOpScan = async (req, res) => {
 
           // Gen lot พักอัตโนมัติ ถ้ายัง qty เหลือ
           if (parkedQty > 0) {
-            // ดึง part_id จาก from_lot_no เดิม (ใช้ part เดิม)
+            // ✅ ดึง part_id จาก owner TK ก่อน — fallback ไป master_tk_id
             const parkedPartId = from_lot
-              ? await getPartIdByLotNo(tx, master_tk_id, from_lot)
+              ? (await getPartIdByLotNo(tx, fromOwnerTk_2, from_lot) || await getPartIdByLotNo(tx, master_tk_id, from_lot))
               : base_part_id;
 
             if (!parkedPartId) { await tx.rollback(); return res.status(400).json({ message: `groups[${gNum}]: cannot resolve part_id for parked lot`, actor }); }
@@ -698,7 +734,7 @@ exports.finishOpScan = async (req, res) => {
             const { run_no: p_run, lot_no: p_lot } = await genNewLot(tx, master_tk_id, parkedPartId, actor.u_id);
 
             await insertTransfer(tx, {
-              from_tk_id: master_tk_id, to_tk_id: master_tk_id,
+              from_tk_id: fromOwnerTk_2, to_tk_id: master_tk_id,  // ✅ cross-TK aware
               from_lot_no: from_lot, to_lot_no: p_lot,
               tf_rs_code: 2, transfer_qty: parkedQty,
               op_sc_id, MC_id: MC_id_val,
@@ -720,7 +756,9 @@ exports.finishOpScan = async (req, res) => {
           }
 
           created_children.push({
-            group: gNum, tf_rs_code: 2, from_lot_no: from_lot,
+            group: gNum, tf_rs_code: 2,
+            from_lot_no: from_lot,
+            from_tk_id:  fromOwnerTk_2,   // ✅ บอก client ว่า lot มาจาก TK ไหน
             lots:        splitLots,
             parked_lots: parkedLots,
           });
@@ -736,19 +774,24 @@ exports.finishOpScan = async (req, res) => {
           if (!first_lot_no) first_lot_no = lot_no;
 
           for (const m of g.merge_lots) {
+            const mLotNo = String(m.from_lot_no).trim();
+            // ✅ Cross-TK: หา owner TK ของแต่ละ merge lot
+            const mergeOwnerTk = (await getLotOwnerTk(tx, mLotNo)) || master_tk_id;
+            if (mergeOwnerTk !== master_tk_id) {
+              await unParkCrossTkLot(tx, mergeOwnerTk, mLotNo);
+            }
             await insertTransfer(tx, {
-              from_tk_id: master_tk_id, to_tk_id: master_tk_id,
-              from_lot_no: String(m.from_lot_no).trim(), to_lot_no: lot_no,
+              from_tk_id: mergeOwnerTk, to_tk_id: master_tk_id,  // ✅ cross-TK aware
+              from_lot_no: mLotNo, to_lot_no: lot_no,
               tf_rs_code: 3, transfer_qty: Math.trunc(Number(m.qty)),
               op_sc_id, MC_id: MC_id_val,
               op_sta_id: actorSta,
-              lot_parked_status: 0,   // ตัวที่ CO = Active
+              lot_parked_status: 0,
               created_by_u_id: actor.u_id, transfer_ts: now,
             });
           }
 
           // Lot ที่ไม่ถูก CO (parked_lots ที่ส่งมาใน g.parked_from_lots)
-          // Frontend/HH ส่ง parked_from_lots = lot ที่เหลือไม่มีคู่
           const parkedLots = [];
           if (Array.isArray(g.parked_from_lots) && g.parked_from_lots.length > 0) {
             for (const pl of g.parked_from_lots) {
@@ -756,19 +799,25 @@ exports.finishOpScan = async (req, res) => {
               const pQty   = Math.trunc(Number(pl.qty));
               if (!pLotNo || pQty <= 0) continue;
 
-              // ดึง part_id จาก lot นั้น
-              const pPartId = await getPartIdByLotNo(tx, master_tk_id, pLotNo);
+              // ✅ Cross-TK: หา owner TK ของ parked lot
+              const plOwnerTk = (await getLotOwnerTk(tx, pLotNo)) || master_tk_id;
+              if (plOwnerTk !== master_tk_id) {
+                await unParkCrossTkLot(tx, plOwnerTk, pLotNo);
+              }
+
+              const pPartId = await getPartIdByLotNo(tx, plOwnerTk, pLotNo)
+                           || await getPartIdByLotNo(tx, master_tk_id, pLotNo);
               if (!pPartId) { await tx.rollback(); return res.status(400).json({ message: `parked lot "${pLotNo}" part_id not found in TKRunLog`, actor }); }
 
               const { run_no: p_run, lot_no: p_lot } = await genNewLot(tx, master_tk_id, pPartId, actor.u_id);
 
               await insertTransfer(tx, {
-                from_tk_id: master_tk_id, to_tk_id: master_tk_id,
+                from_tk_id: plOwnerTk, to_tk_id: master_tk_id,  // ✅ cross-TK aware
                 from_lot_no: pLotNo, to_lot_no: p_lot,
                 tf_rs_code: 3, transfer_qty: pQty,
                 op_sc_id, MC_id: MC_id_val,
                 op_sta_id: actorSta,
-                lot_parked_status: 1,   // ← พักไว้
+                lot_parked_status: 1,
                 created_by_u_id: actor.u_id, transfer_ts: now,
               });
               parkedLots.push({ run_no: p_run, lot_no: p_lot, qty: pQty, parked_at_sta: actorSta });
@@ -784,10 +833,10 @@ exports.finishOpScan = async (req, res) => {
           created_children.push({
             group: gNum, tf_rs_code: 3,
             out_part_no: outPart.part_no, out_part_name: outPart.part_name ?? null,
-            to_lot_no: lot_no,           // ✅ lot ใหม่ที่ merge ออกมา
-            merge_qty: g.qty,            // ✅ total qty ที่ merge
+            to_lot_no: lot_no,
+            merge_qty: g.qty,
             merged_from: g.merge_lots.map(m => ({ from_lot_no: m.from_lot_no, qty: Math.trunc(Number(m.qty)) })),
-            lots:        [{ run_no, lot_no, qty: g.qty }],  // ✅ g.qty = sum(merge_lots) injected
+            lots:        [{ run_no, lot_no, qty: g.qty }],
             parked_lots: parkedLots,
           });
         }
@@ -836,16 +885,18 @@ exports.finishOpScan = async (req, res) => {
           if (!lotNo || usedFromLots.has(lotNo)) continue;
 
           // ✅ UPDATE แถวเดิม — ไม่สร้าง row ใหม่ / ไม่มี FK ปัญหา
-          await new sql.Request(tx)
-            .input("tk_id",  sql.VarChar(20),  master_tk_id)
-            .input("lot_no", sql.NVarChar(300), lotNo)
-            .query(`
-              UPDATE ${SAFE_TRANSFER}
-              SET lot_parked_status = 1
-              WHERE from_tk_id        = @tk_id
-                AND to_lot_no         = @lot_no
-                AND lot_parked_status = 0
-            `);
+        await new sql.Request(tx)
+  .input("tk_id",    sql.VarChar(20),  master_tk_id)
+  .input("lot_no",   sql.NVarChar(300), lotNo)
+  .input("op_sta_id", sql.VarChar(20), actorSta)
+  .query(`
+    UPDATE ${SAFE_TRANSFER}
+    SET lot_parked_status = 1,
+        op_sta_id         = @op_sta_id   -- ✅ อัปเดต station ที่พักจริง
+    WHERE from_tk_id        = @tk_id
+      AND to_lot_no         = @lot_no
+      AND lot_parked_status = 0
+  `);
 
           console.log(`[MARK_PARKED] lot=${lotNo} tk=${master_tk_id} sta=${actorSta}`);
         }
