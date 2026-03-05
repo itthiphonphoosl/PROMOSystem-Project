@@ -136,7 +136,7 @@ async function unParkCrossTkLot(tx, owner_tk_id, lot_no) {
 // INSERT 1 row ใน t_transfer พร้อม field ใหม่ op_sta_id + lot_parked_status
 async function insertTransfer(tx, { from_tk_id, to_tk_id, from_lot_no, to_lot_no,
   tf_rs_code, transfer_qty, op_sc_id, MC_id, op_sta_id,
-  lot_parked_status, created_by_u_id, transfer_ts }) {
+  lot_parked_status, created_by_u_id, transfer_ts, color_id }) {
   await new sql.Request(tx)
     .input("from_tk_id",        sql.VarChar(20),   from_tk_id)
     .input("to_tk_id",          sql.VarChar(20),   to_tk_id)
@@ -150,17 +150,18 @@ async function insertTransfer(tx, { from_tk_id, to_tk_id, from_lot_no, to_lot_no
     .input("lot_parked_status", sql.Bit,           lot_parked_status ?? 0)
     .input("created_by_u_id",   sql.Int,           Number(created_by_u_id))
     .input("transfer_ts",       sql.DateTime2(3),  transfer_ts)
+    .input("color_id",          sql.Int,           color_id ?? null)
     .query(`
       INSERT INTO ${SAFE_TRANSFER}
         (from_tk_id, to_tk_id, from_lot_no, to_lot_no,
          tf_rs_code, transfer_qty, op_sc_id, MC_id,
          op_sta_id, lot_parked_status,
-         created_by_u_id, transfer_ts)
+         created_by_u_id, transfer_ts, color_id)
       VALUES
         (@from_tk_id, @to_tk_id, @from_lot_no, @to_lot_no,
          @tf_rs_code, @transfer_qty, @op_sc_id, @MC_id,
          @op_sta_id, @lot_parked_status,
-         @created_by_u_id, @transfer_ts)
+         @created_by_u_id, @transfer_ts, @color_id)
     `);
 }
 
@@ -411,6 +412,8 @@ exports.finishOpScan = async (req, res) => {
   const scrap_qty     = Math.abs(Number(req.body.scrap_qty));
   const total_qty     = good_qty + scrap_qty;
   const groups        = Array.isArray(req.body.groups) ? req.body.groups : [];
+  // STA006: color_id อยู่ใน g.color_id (tf=1,tf=3) หรือ s.color_id (tf=2 per split)
+  const _safeColorId  = (v) => (v != null && Number.isFinite(Number(v))) ? Number(v) : null;
 
   if (!op_sc_id)  return res.status(400).json({ message: "op_sc_id is required", actor });
   if (!Number.isFinite(good_qty) || !Number.isFinite(scrap_qty))
@@ -682,6 +685,7 @@ exports.finishOpScan = async (req, res) => {
             op_sta_id: actorSta,
             lot_parked_status: 0,
             created_by_u_id: actor.u_id, transfer_ts: now,
+            color_id: actorSta === 'STA006' ? _safeColorId(g.color_id) : null,
           });
 
           created_children.push({
@@ -716,12 +720,33 @@ exports.finishOpScan = async (req, res) => {
           const parkedLots = [];
 
           // Gen lot สำหรับตัวที่ใช้จริง
-          for (const s of splits) {
+          // ✅ Split ตัวแรก → ใช้ from_lot เดิม (to_lot_no = from_lot)
+          //    Split ตัวที่ 2, 3, ... → gen lot ใหม่ตามปกติ
+          for (let si = 0; si < splits.length; si++) {
+            const s = splits[si];
             const outPart = await getPartByNo(tx, String(s.out_part_no).trim());
             if (!outPart) { await tx.rollback(); return res.status(400).json({ message: `groups[${gNum}] split: out_part_no "${s.out_part_no}" not found`, actor }); }
 
             const s_qty = Math.trunc(Number(s.qty));
-            const { run_no, lot_no } = await genNewLot(tx, master_tk_id, outPart.part_id, actor.u_id);
+
+            let run_no, lot_no;
+            if (si === 0) {
+              // ✅ ตัวแรก: ใช้ lot เดิม — ไม่ gen ใหม่
+              lot_no = from_lot;
+              // ดึง run_no ของ lot เดิมจาก TKRunLog
+              const rnR = await new sql.Request(tx)
+                .input('tk_id',  sql.VarChar(20),  master_tk_id)
+                .input('lot_no', sql.NVarChar(300), from_lot)
+                .query(`SELECT TOP 1 run_no FROM dbo.TKRunLog WITH (NOLOCK)
+                        WHERE tk_id = @tk_id AND lot_no = @lot_no`);
+              run_no = rnR.recordset?.[0]?.run_no ?? null;
+            } else {
+              // ตัวที่ 2 ขึ้นไป: gen lot ใหม่
+              const gen = await genNewLot(tx, master_tk_id, outPart.part_id, actor.u_id);
+              run_no = gen.run_no;
+              lot_no = gen.lot_no;
+            }
+
             if (!first_lot_no) first_lot_no = lot_no;
 
             await insertTransfer(tx, {
@@ -732,6 +757,7 @@ exports.finishOpScan = async (req, res) => {
               op_sta_id: actorSta,
               lot_parked_status: 0,   // ตัวที่ใช้ = Active
               created_by_u_id: actor.u_id, transfer_ts: now,
+              color_id: actorSta === 'STA006' ? _safeColorId(s.color_id) : null,
             });
             splitLots.push({ run_no, lot_no, out_part_no: outPart.part_no, qty: s_qty });
           }
@@ -755,6 +781,7 @@ exports.finishOpScan = async (req, res) => {
               op_sta_id: actorSta,
               lot_parked_status: 1,   // ← พักไว้
               created_by_u_id: actor.u_id, transfer_ts: now,
+              color_id: null,
             });
             parkedLots.push({ run_no: p_run, lot_no: p_lot, qty: parkedQty, parked_at_sta: actorSta });
           }
@@ -802,6 +829,7 @@ exports.finishOpScan = async (req, res) => {
               op_sta_id: actorSta,
               lot_parked_status: 0,
               created_by_u_id: actor.u_id, transfer_ts: now,
+              color_id: actorSta === 'STA006' ? _safeColorId(g.color_id) : null,
             });
           }
 
@@ -833,6 +861,7 @@ exports.finishOpScan = async (req, res) => {
                 op_sta_id: actorSta,
                 lot_parked_status: 1,
                 created_by_u_id: actor.u_id, transfer_ts: now,
+                color_id: actorSta === 'STA006' ? _safeColorId(g.color_id) : null,
               });
               parkedLots.push({ run_no: p_run, lot_no: p_lot, qty: pQty, parked_at_sta: actorSta });
             }

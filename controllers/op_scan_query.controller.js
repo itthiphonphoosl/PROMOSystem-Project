@@ -293,6 +293,10 @@ exports.getTkSummary = async (req, res) => {
             WHEN 0 THEN 'Active'
             WHEN 1 THEN 'Parked'
           END AS lot_status_name,
+          -- STA006: สีที่ติดมากับ lot นี้
+          t.color_id,
+          cp.color_no,
+          cp.color_name,
           t.created_by_u_id,
           u.u_name AS created_by_u_name,
           t.transfer_ts
@@ -301,6 +305,7 @@ exports.getTkSummary = async (req, res) => {
         LEFT JOIN dbo.op_station      s  ON s.op_sta_id   = t.op_sta_id
         LEFT JOIN dbo.machine         m  ON m.MC_id       = t.MC_id
         LEFT JOIN dbo.[user]          u  ON u.u_id        = t.created_by_u_id
+        LEFT JOIN dbo.color_painting    cp ON cp.color_id    = t.color_id
         WHERE t.from_tk_id = @tk_id OR t.to_tk_id = @tk_id
         ORDER BY t.transfer_ts ASC
       `);
