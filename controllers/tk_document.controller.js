@@ -125,7 +125,6 @@ exports.createTkDoc = async (req, res) => {
         throw new Error("DB did not return run_no/lot_no from usp_TKRunLog_Create");
       }
 
-      // ✅ ลบ tk_parent_id ออกแล้ว
       await new sql.Request(tx)
         .input("tk_id",            sql.VarChar(20),  tk_id)
         .input("MC_id",            sql.VarChar(10),  null)
@@ -153,7 +152,6 @@ exports.createTkDoc = async (req, res) => {
   message: "Created TK document",
   id: tk_id,
 
-  // ✅ เพิ่มให้ตอบออกมาครบตามที่คุณต้องการ
   part_id: Number(partRow.part_id),
   part_no: partRow.part_no,
   part_name: partRow.part_name,
