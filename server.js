@@ -12,8 +12,7 @@ const machineRoutes = require("./routes/machine.routes");
 const transferRoutes = require("./routes/transfers.routes");
 const tkDocRoutes = require("./routes/tk_document.routes");
 const partRoutes = require("./routes/part.routes");
-
-// DB
+const colorRoutes = require("./routes/color.routes");
 const { getPool } = require("./config/db");
 
 const app = express();
@@ -35,7 +34,7 @@ app.use("/api", partRoutes);
 app.use("/api/transfers", transferRoutes);
 app.use("/api", tkDocRoutes);
 app.use("/api", require("./routes/op_scan.routes"));
-
+app.use("/api", colorRoutes);
 function getLanIp() {
   const nets = os.networkInterfaces();
   for (const name of Object.keys(nets)) {
