@@ -43,7 +43,8 @@ function normalizeClientType(raw) {
 function actorOf(req) {
   return {
     u_id:        req.user?.u_id        ?? null,
-    u_name:      req.user?.u_name      ?? "unknown",
+    u_firstname: req.user?.u_firstname ?? "",
+    u_lastname:  req.user?.u_lastname  ?? "",
     role:        req.user?.role        ?? "unknown",
     u_type:      req.user?.u_type      ?? "unknown",
     op_sta_id:   req.user?.op_sta_id   ?? null,
@@ -173,20 +174,26 @@ exports.startOpScan = async (req, res) => {
     try {
       const now = new Date();
 
-      // ① TKHead ต้องไม่ FINISHED
-      const [headRows] = await conn.query(
-        `SELECT tk_status FROM \`TKHead\` WHERE tk_id = ? LIMIT 1`,
-        [tk_id]
-      );
-      const headStatus = Number(headRows[0]?.tk_status ?? -1);
-      if (headStatus === -1) {
-        await conn.rollback(); conn.release();
-        return res.status(404).json({ message: "tk_id not found", actor, tk_id });
-      }
-      if (headStatus === 1) {
-        await conn.rollback(); conn.release();
-        return res.status(403).json({ message: "This tk_id is FINISHED. Cannot start.", actor, tk_id });
-      }
+     // ใหม่ — เพิ่ม tk_active ใน SELECT แล้วเช็คก่อน FINISHED
+const [headRows] = await conn.query(
+  `SELECT tk_status, tk_active FROM \`TKHead\` WHERE tk_id = ? LIMIT 1`,
+  [tk_id]
+);
+const headRow    = headRows[0];
+const headStatus = Number(headRow?.tk_status ?? -1);
+if (headStatus === -1) {
+  await conn.rollback(); conn.release();
+  return res.status(404).json({ message: "tk_id not found", actor, tk_id });
+}
+// ✅ เพิ่ม: block ถ้าเอกสารถูกปิด
+if (Number(headRow?.tk_active) !== 1) {
+  await conn.rollback(); conn.release();
+  return res.status(403).json({ message: "เอกสารนี้ถูกปิดใช้งานอยู่ กรุณาติดต่อ Admin", actor, tk_id, tk_active: Number(headRow?.tk_active) });
+}
+if (headStatus === 1) {
+  await conn.rollback(); conn.release();
+  return res.status(403).json({ message: "This tk_id is FINISHED. Cannot start.", actor, tk_id });
+}
 
       // ② TKDetail
       const [tkDetailRows] = await conn.query(
@@ -347,7 +354,7 @@ exports.startOpScan = async (req, res) => {
 
       return res.status(201).json({
         message: "Started",
-        actor:   { u_id: actor.u_id, u_name: actor.u_name, role: actor.role },
+        actor:   { u_id: actor.u_id, u_firstname: actor.u_firstname, u_lastname: actor.u_lastname, role: actor.role },
         op_sc_id, op_sta_id, op_sta_name: actor.op_sta_name ?? null, MC_id,
         op_sc_total_qty: 0,
         base_lot_no, base_run_no,
@@ -524,15 +531,20 @@ exports.finishOpScan = async (req, res) => {
       const master_tk_id = String(row.tk_id || "").trim();
 
       // ③ TKHead ต้องไม่ FINISHED
-      const [headRows] = await conn.query(
-        `SELECT tk_status FROM \`TKHead\` WHERE tk_id = ? LIMIT 1`,
-        [master_tk_id]
-      );
-      if (Number(headRows[0]?.tk_status) === 1) {
-        await conn.rollback(); conn.release();
-        return res.status(403).json({ message: "This tk_id is FINISHED. Cannot finish again.", actor, tk_id: master_tk_id });
-      }
-
+    // ใหม่ — เพิ่ม tk_active ใน SELECT แล้วเช็คก่อน FINISHED
+const [headRows] = await conn.query(
+  `SELECT tk_status, tk_active FROM \`TKHead\` WHERE tk_id = ? LIMIT 1`,
+  [master_tk_id]
+);
+//  เพิ่ม: block ถ้าเอกสารถูกปิด
+if (Number(headRows[0]?.tk_active) !== 1) {
+  await conn.rollback(); conn.release();
+  return res.status(403).json({ message: "เอกสารนี้ถูกปิดใช้งานอยู่ กรุณาติดต่อ Admin", actor, tk_id: master_tk_id, tk_active: Number(headRows[0]?.tk_active) });
+}
+if (Number(headRows[0]?.tk_status) === 1) {
+  await conn.rollback(); conn.release();
+  return res.status(403).json({ message: "This tk_id is FINISHED. Cannot finish again.", actor, tk_id: master_tk_id });
+}
       // ④ base lot
       const [baseDetailRows] = await conn.query(
         `SELECT lot_no, part_id FROM ${SAFE_TKDETAIL}
@@ -916,7 +928,7 @@ exports.finishOpScan = async (req, res) => {
 
       return res.json({
         message: "Finished",
-        actor:   { u_id: actor.u_id, u_name: actor.u_name, role: actor.role },
+        actor:   { u_id: actor.u_id, u_firstname: actor.u_firstname, u_lastname: actor.u_lastname, role: actor.role },
         op_sc_id, tk_id: master_tk_id,
         op_sta_id: actorSta, op_sta_name: actor.op_sta_name ?? null,
         MC_id: row.MC_id ?? null,

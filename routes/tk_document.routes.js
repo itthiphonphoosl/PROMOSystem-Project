@@ -1,5 +1,5 @@
 const express = require("express");
-const router = express.Router();
+const router  = express.Router();
 
 const {
   requireAuth,
@@ -8,12 +8,13 @@ const {
 } = require("../middleware/auth.middleware");
 
 const {
-  createTkDoc,     // (จริงๆ คือ create TKHead+first TKDetail)
-  getTkDocById,    // get เอกสาร/รายละเอียด
-  listTkDocs,      // list เอกสาร
+  createTkDoc,
+  getTkDocById,
+  listTkDocs,
+  updateTkDoc,
+  deleteTkDoc,
 } = require("../controllers/tk_document.controller");
 
-// ✅ ดูรายการเอกสาร (React/PC)
 router.get(
   "/TKDocs",
   requireAuth,
@@ -22,7 +23,6 @@ router.get(
   listTkDocs
 );
 
-// ✅ ดูเอกสารรายตัว (React/PC + HH scan)
 router.get(
   "/TKDocs/:id",
   requireAuth,
@@ -31,13 +31,28 @@ router.get(
   getTkDocById
 );
 
-// ✅ สร้างเอกสาร (admin เท่านั้น + PC เท่านั้น)
 router.post(
   "/TKDocs",
   requireAuth,
   requireRole(["admin"]),
   requireClientType(["PC"]),
   createTkDoc
+);
+
+router.put(
+  "/TKDocs/:id",
+  requireAuth,
+  requireRole(["admin"]),
+  requireClientType(["PC"]),
+  updateTkDoc
+);
+
+router.delete(
+  "/TKDocs/:id",
+  requireAuth,
+  requireRole(["admin"]),
+  requireClientType(["PC"]),
+  deleteTkDoc
 );
 
 module.exports = router;

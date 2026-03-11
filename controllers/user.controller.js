@@ -44,7 +44,7 @@ async function listUsers(req, res) {
     const total = Number(countRow?.total || 0);
 
     const [rows] = await pool.query(
-      `SELECT u_id, u_username, u_name, u_type, u_active, u_created_ts, u_updated_ts
+      `SELECT u_id, u_username, u_firstname, u_lastname, u_type, u_active, u_created_ts, u_updated_ts
        FROM \`user\`
        ${where}
        ORDER BY u_id ASC
@@ -77,7 +77,7 @@ async function getUserById(req, res) {
     if (!pool) return res.status(500).json({ message: "Database connection failed" });
 
     const [rows] = await pool.query(
-      `SELECT u_id, u_username, u_name, u_type, u_active, u_created_ts, u_updated_ts
+      `SELECT u_id, u_username, u_firstname, u_lastname, u_type, u_active, u_created_ts, u_updated_ts
        FROM \`user\`
        WHERE u_id = ?
        LIMIT 1`,
@@ -118,22 +118,24 @@ async function updateUser(req, res) {
     return res.status(400).json({ message: "Invalid user id" });
   }
 
-  const u_name     = req.body.u_name     !== undefined ? String(req.body.u_name).trim()     : undefined;
+  const u_firstname = req.body.u_firstname !== undefined ? String(req.body.u_firstname).trim() : undefined;
+  const u_lastname  = req.body.u_lastname  !== undefined ? String(req.body.u_lastname).trim()  : undefined;
   const u_username = req.body.u_username !== undefined ? String(req.body.u_username).trim() : undefined;
   const u_password = req.body.u_password !== undefined ? String(req.body.u_password).trim() : undefined;
   const u_type     = req.body.u_type     !== undefined ? String(req.body.u_type).trim()     : undefined;
   const u_active   = req.body.u_active   !== undefined ? Number(req.body.u_active)          : undefined;
 
-  const hasAny = u_name !== undefined || u_username !== undefined ||
+  const hasAny = u_firstname !== undefined || u_lastname !== undefined || u_username !== undefined ||
     u_password !== undefined || u_type !== undefined || u_active !== undefined;
 
   if (!hasAny) {
     return res.status(400).json({
-      message: "No fields to update (ต้องส่งอย่างน้อย 1 ฟิลด์ใน u_name/u_username/u_password/u_type/u_active)",
+      message: "No fields to update (ต้องส่งอย่างน้อย 1 ฟิลด์ใน u_firstname/u_lastname/u_username/u_password/u_type/u_active)",
     });
   }
 
-  if (u_name     !== undefined && !u_name)     return res.status(400).json({ message: "u_name ห้ามเป็นค่าว่าง" });
+  if (u_firstname !== undefined && !u_firstname) return res.status(400).json({ message: "u_firstname ห้ามเป็นค่าว่าง" });
+  if (u_lastname  !== undefined && !u_lastname)  return res.status(400).json({ message: "u_lastname ห้ามเป็นค่าว่าง" });
   if (u_username !== undefined && !u_username) return res.status(400).json({ message: "u_username ห้ามเป็นค่าว่าง" });
   if (u_password !== undefined && !u_password) return res.status(400).json({ message: "u_password ห้ามเป็นค่าว่าง" });
   if (u_type     !== undefined && !["op", "ad"].includes(u_type)) return res.status(400).json({ message: "u_type ต้องเป็น op หรือ ad เท่านั้น" });
@@ -177,7 +179,8 @@ async function updateUser(req, res) {
       await conn.query(
         `UPDATE \`user\`
          SET
-           u_name       = COALESCE(?, u_name),
+           u_firstname  = COALESCE(?, u_firstname),
+           u_lastname   = COALESCE(?, u_lastname),
            u_username   = COALESCE(?, u_username),
            u_password   = COALESCE(?, u_password),
            u_type       = COALESCE(?, u_type),
@@ -185,7 +188,8 @@ async function updateUser(req, res) {
            u_updated_ts = ?
          WHERE u_id = ?`,
         [
-          u_name     ?? null,
+          u_firstname ?? null,
+          u_lastname  ?? null,
           u_username ?? null,
           storedPassword ?? null,
           u_type     ?? null,
@@ -202,7 +206,8 @@ async function updateUser(req, res) {
         message: "อัปเดตผู้ใช้สำเร็จ",
         u_id: id,
         updatedFields: {
-          u_name:     u_name     !== undefined,
+          u_firstname: u_firstname !== undefined,
+          u_lastname:  u_lastname  !== undefined,
           u_username: u_username !== undefined,
           u_password: u_password !== undefined,
           u_type:     u_type     !== undefined,

@@ -50,7 +50,7 @@ async function login(req, res) {
 
     // 1) find user
     const [userRows] = await pool.query(
-      `SELECT u_id, u_username, u_password, u_type, u_active, u_name
+      `SELECT u_id, u_username, u_password, u_type, u_active, u_firstname, u_lastname
        FROM \`user\`
        WHERE u_username = ?
        LIMIT 1`,
@@ -167,7 +167,7 @@ async function login(req, res) {
     }
 
     console.log(
-      `[LOGIN] u_id=${user.u_id} u_name=${user.u_name} u_username=${user.u_username} clientType=${safeClientType} tokenId=${tokenId} expiresAt=${expiresAt.toISOString()} op_sta_id=${isOperatorHH ? op_sta_id : "-"}`
+      `[LOGIN] u_id=${user.u_id} u_name=${user.u_firstname} ${user.u_lastname} u_username=${user.u_username} clientType=${safeClientType} tokenId=${tokenId} expiresAt=${expiresAt.toISOString()} op_sta_id=${isOperatorHH ? op_sta_id : "-"}`
     );
 
     // ✅ response: add op_sta_name
@@ -178,7 +178,8 @@ async function login(req, res) {
       tokenId,
       userInfo: {
         u_id:        String(user.u_id),
-        u_name:      user.u_name,
+        u_firstname: user.u_firstname,
+        u_lastname:  user.u_lastname,
         u_type:      user.u_type,
         role,
         op_sta_id:   isOperatorHH ? op_sta_id   : null,
@@ -231,11 +232,12 @@ async function logout(req, res) {
 async function createUser(req, res) {
   const username = String(req.body.username || "").trim();
   const password = String(req.body.password || "").trim();
-  const name     = String(req.body.name     || "").trim();
+  const firstname = String(req.body.firstname || "").trim();
+  const lastname  = String(req.body.lastname  || "").trim();
   const u_type   = String(req.body.u_type   || "").trim();
   const active   = req.body.active === undefined ? 1 : Number(req.body.active);
 
-  if (!username || !password || !name || !u_type) {
+  if (!username || !password || !firstname || !u_type) {
     return res.status(400).json({ message: "กรุณากรอก username, password, name, u_type" });
   }
 
@@ -269,9 +271,9 @@ async function createUser(req, res) {
       const nextId = maxRows[0].nextId;
 
       await conn.query(
-        `INSERT INTO \`user\` (u_id, u_username, u_password, u_name, u_type, u_active, u_created_ts, u_updated_ts)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [nextId, username, hashed, name, u_type, active, now, now]
+        `INSERT INTO \`user\` (u_id, u_username, u_password, u_firstname, u_lastname, u_type, u_active, u_created_ts, u_updated_ts)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [nextId, username, hashed, firstname, lastname, u_type, active, now, now]
       );
 
       await conn.commit();
@@ -283,7 +285,8 @@ async function createUser(req, res) {
           u_id:      nextId,
           u_username: username,
           password:  "hash password",
-          u_name:    name,
+          u_firstname: firstname,
+          u_lastname:  lastname,
           u_type,
           u_active:  active,
         },
@@ -329,8 +332,8 @@ async function getAllUsers(req, res) {
     const params = [];
 
     if (q) {
-      where += " AND (u_username LIKE ? OR u_name LIKE ?)";
-      params.push(`%${q}%`, `%${q}%`);
+      where += " AND (u_username LIKE ? OR u_firstname LIKE ? OR u_lastname LIKE ?)";
+      params.push(`%${q}%`, `%${q}%`, `%${q}%`);
     }
 
     if (type) {
@@ -344,7 +347,7 @@ async function getAllUsers(req, res) {
     }
 
     const [rows] = await pool.query(
-      `SELECT u_id, u_username, u_name, u_type, u_active, u_created_ts, u_updated_ts
+      `SELECT u_id, u_username, u_firstname, u_lastname, u_type, u_active, u_created_ts, u_updated_ts
        FROM \`user\`
        ${where}
        ORDER BY u_id ASC`,
@@ -370,7 +373,7 @@ async function getUsersByType(req, res) {
     if (!pool) return res.status(500).json({ message: "เชื่อมต่อฐานข้อมูลไม่สำเร็จ" });
 
     const [rows] = await pool.query(
-      `SELECT u_id, u_username, u_name, u_type, u_active, u_created_ts, u_updated_ts
+      `SELECT u_id, u_username, u_firstname, u_lastname, u_type, u_active, u_created_ts, u_updated_ts
        FROM \`user\`
        WHERE u_type = ?
        ORDER BY u_id ASC`,

@@ -14,7 +14,8 @@ const SAFE_COLOR = safeTableName(COLOR_TABLE);
 function actorOf(req) {
   return {
     u_id:   req.user?.u_id   ?? null,
-    u_name: req.user?.u_name ?? "unknown",
+    u_firstname: req.user?.u_firstname ?? "",
+    u_lastname:  req.user?.u_lastname  ?? "",
     role:   req.user?.role   ?? "unknown",
   };
 }

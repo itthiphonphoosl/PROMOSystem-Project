@@ -14,7 +14,8 @@ const SAFE_TRANSFER = safeTableName(TRANSFER_TABLE);
 function actorOf(req) {
   return {
     u_id:   req.user?.u_id   ?? null,
-    u_name: req.user?.u_name ?? "unknown",
+    u_firstname: req.user?.u_firstname ?? "",
+    u_lastname:  req.user?.u_lastname  ?? "",
     role:   req.user?.role   ?? "unknown",
     u_type: req.user?.u_type ?? "unknown",
   };
@@ -45,7 +46,7 @@ exports.listTransfers = async (req, res) => {
          t.transfer_id, t.from_tk_id, t.to_tk_id, t.from_lot_no, t.to_lot_no,
          t.tf_rs_code, tr.tf_rs_name, t.transfer_qty, t.op_sc_id,
          t.MC_id, m.MC_name, s.op_sta_id, s.op_sta_name,
-         t.created_by_u_id, u.u_name AS created_by_u_name, t.transfer_ts
+         t.created_by_u_id, u.u_firstname AS created_by_u_firstname, u.u_lastname AS created_by_u_lastname, t.transfer_ts
        FROM ${SAFE_TRANSFER} t
        LEFT JOIN \`transfer_reason\` tr ON tr.tf_rs_code = t.tf_rs_code
        LEFT JOIN \`machine\`         m  ON m.MC_id       = t.MC_id
@@ -81,7 +82,7 @@ exports.getTransferById = async (req, res) => {
          t.transfer_id, t.from_tk_id, t.to_tk_id, t.from_lot_no, t.to_lot_no,
          t.tf_rs_code, tr.tf_rs_name, t.transfer_qty, t.op_sc_id,
          t.MC_id, m.MC_name, s.op_sta_id, s.op_sta_name,
-         t.created_by_u_id, u.u_name AS created_by_u_name, t.transfer_ts
+         t.created_by_u_id, u.u_firstname AS created_by_u_firstname, u.u_lastname AS created_by_u_lastname, t.transfer_ts
        FROM ${SAFE_TRANSFER} t
        LEFT JOIN \`transfer_reason\` tr ON tr.tf_rs_code = t.tf_rs_code
        LEFT JOIN \`machine\`         m  ON m.MC_id       = t.MC_id

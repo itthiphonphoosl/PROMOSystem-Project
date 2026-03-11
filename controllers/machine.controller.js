@@ -179,7 +179,7 @@ async function createMachine(req, res) {
       await conn.commit();
       conn.release();
 
-      console.log(`[MACHINE][CREATE] u_name=${req.user?.u_name ?? "?"} role=${req.user?.role ?? "?"} mc_id=${mc_id} created=${JSON.stringify({ mc_name, mc_active, op_sta_id })}`);
+      console.log(`[MACHINE][CREATE] name=${req.user?.u_firstname ?? ""} ${req.user?.u_lastname ?? ""} role=${req.user?.role ?? "?"} mc_id=${mc_id} created=${JSON.stringify({ mc_name, mc_active, op_sta_id })}`);
 
       return res.status(201).json({ message: "created", machine: { mc_id, mc_name, mc_active, op_sta_id, op_sta_name: staName } });
     } catch (e) {

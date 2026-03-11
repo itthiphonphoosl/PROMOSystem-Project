@@ -29,7 +29,8 @@ function normalizeClientType(raw) {
 function actorOf(req) {
   return {
     u_id:        req.user?.u_id        ?? null,
-    u_name:      req.user?.u_name      ?? "unknown",
+    u_firstname: req.user?.u_firstname ?? "",
+    u_lastname:  req.user?.u_lastname  ?? "",
     role:        req.user?.role        ?? "unknown",
     u_type:      req.user?.u_type      ?? "unknown",
     op_sta_id:   req.user?.op_sta_id   ?? null,
@@ -157,6 +158,25 @@ exports.getActiveOpScanByTkId = async (req, res) => {
   try {
     const pool = getPool();
 
+    // ✅ block operator ถ้าเอกสารถูกปิด
+    if (isOperator) {
+      const [[tkHead]] = await pool.query(
+        `SELECT tk_active FROM \`TKHead\` WHERE tk_id = ? LIMIT 1`,
+        [tk_id]
+      );
+      if (!tkHead) {
+        return res.status(404).json({ message: "tk_id not found", actor, tk_id });
+      }
+      if (Number(tkHead.tk_active) !== 1) {
+        return res.status(403).json({
+          message:   "เอกสารนี้ถูกปิดใช้งานอยู่ กรุณาติดต่อ Admin",
+          tk_id,
+          tk_active: Number(tkHead.tk_active),
+          actor,
+        });
+      }
+    }
+
     const whereExtra = isOperator
       ? "AND TRIM(COALESCE(s.op_sta_id, m.op_sta_id)) = ?"
       : "";
@@ -212,13 +232,18 @@ exports.getTkSummary = async (req, res) => {
     const pool = getPool();
 
     // 1) TKHead
-    const [headRows] = await pool.query(
-      `SELECT tk_id, tk_status, created_by_u_id, tk_created_at_ts
-       FROM \`TKHead\` WHERE tk_id = ? LIMIT 1`,
-      [tk_id]
-    );
-    const head = headRows[0];
-    if (!head) return res.status(404).json({ message: "tk_id not found", actor, tk_id });
+   // ใหม่ — เพิ่ม tk_active ใน SELECT + block operator
+const [headRows] = await pool.query(
+  `SELECT tk_id, tk_status, tk_active, created_by_u_id, tk_created_at_ts
+   FROM \`TKHead\` WHERE tk_id = ? LIMIT 1`,
+  [tk_id]
+);
+const head = headRows[0];
+if (!head) return res.status(404).json({ message: "tk_id not found", actor, tk_id });
+// ✅ เพิ่ม: block operator ถ้าเอกสารถูกปิด
+if (Number(head.tk_active) !== 1 && actor.u_type === "op") {
+  return res.status(403).json({ message: "เอกสารนี้ถูกปิดใช้งานอยู่ กรุณาติดต่อ Admin", actor, tk_id, tk_active: Number(head.tk_active) });
+}
 
     // 2) TKDetail
     const [detailRows] = await pool.query(
@@ -236,7 +261,7 @@ exports.getTkSummary = async (req, res) => {
       `SELECT
          s.op_sc_id, s.op_sta_id, st.op_sta_name,
          s.MC_id, m.MC_name,
-         s.u_id, u.u_name,
+         s.u_id, u.u_firstname, u.u_lastname,
          s.op_sc_total_qty, s.op_sc_good_qty, s.op_sc_scrap_qty,
          s.tf_rs_code, s.lot_no,
          s.op_sc_ts, s.op_sc_finish_ts,
@@ -261,7 +286,7 @@ exports.getTkSummary = async (req, res) => {
          t.lot_parked_status,
          CASE t.lot_parked_status WHEN 0 THEN 'Active' WHEN 1 THEN 'Parked' END AS lot_status_name,
          t.color_id, cp.color_no, cp.color_name,
-         t.created_by_u_id, u.u_name AS created_by_u_name,
+         t.created_by_u_id, u.u_firstname AS created_by_u_firstname, u.u_lastname AS created_by_u_lastname,
          t.transfer_ts
        FROM ${SAFE_TRANSFER} t
        LEFT JOIN \`transfer_reason\` tr ON tr.tf_rs_code = t.tf_rs_code
@@ -369,13 +394,15 @@ exports.getTkSummary = async (req, res) => {
       0: "NOT_STARTED", 1: "FINISHED", 2: "PARTIAL_DONE", 3: "IN_PROGRESS",
     }[head.tk_status] ?? "UNKNOWN";
 
-    return res.json({
-      actor,
-      tk_id:            head.tk_id,
-      tk_status:        head.tk_status,
-      tk_status_label,
-      is_finished:      head.tk_status === 1,
-      tk_created_at_ts: head.tk_created_at_ts ? new Date(head.tk_created_at_ts).toISOString() : null,
+   return res.json({
+  actor,
+  tk_id:            head.tk_id,
+  tk_status:        head.tk_status,
+  tk_status_label,
+  is_finished:      head.tk_status === 1,
+  tk_active:        Number(head.tk_active),
+  is_active:        Number(head.tk_active) === 1,
+  tk_created_at_ts: head.tk_created_at_ts ? new Date(head.tk_created_at_ts).toISOString() : null,
 
       base:    { run_no: base_run_no, lot_no: base_lot_no },
       current: detail ? {
