@@ -1,7 +1,7 @@
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 
-const { sql, getPool } = require("../config/db");
+const { getPool } = require("../config/db");
 
 // map u_type -> role (no Utils folder)
 function mapUserTypeToRole(u_type) {
@@ -14,8 +14,8 @@ function mapUserTypeToRole(u_type) {
 // convert "10s" / "30m" / "24h" / "7d" -> milliseconds
 function durationToMs(text) {
   const s = String(text || "24h").trim().toLowerCase();
-  const m = s.match(/^(\d+)\s*([smhd])$/); // 10s / 30m / 24h / 7d
-  if (!m) return 24 * 60 * 60 * 1000; // fallback 24h
+  const m = s.match(/^(\d+)\s*([smhd])$/);
+  if (!m) return 24 * 60 * 60 * 1000;
   const n = parseInt(m[1], 10);
   const unit = m[2];
   if (unit === "s") return n * 1000;
@@ -25,7 +25,6 @@ function durationToMs(text) {
   return 24 * 60 * 60 * 1000;
 }
 
-
 function normalizeClientType(raw) {
   const v = String(raw || "").trim().toUpperCase();
   if (v === "REACT" || v === "PC") return "PC";
@@ -34,13 +33,11 @@ function normalizeClientType(raw) {
 }
 
 async function login(req, res) {
-  const username = String(req.body.username || "").trim();
-  const password = String(req.body.password || "").trim(); // admin/PC uses this
-  const op_sta_id = String(req.body.op_sta_id || "").trim(); // operator/HH uses this
+  const username   = String(req.body.username   || "").trim();
+  const password   = String(req.body.password   || "").trim();
+  const op_sta_id  = String(req.body.op_sta_id  || "").trim();
 
-  const clientTypeRaw =
-    req.get("x-client-type") || req.headers["x-client-type"] || "UNKNOWN";
-
+  const clientTypeRaw = req.get("x-client-type") || req.headers["x-client-type"] || "UNKNOWN";
   const safeClientType = normalizeClientType(clientTypeRaw);
 
   if (!username) {
@@ -48,21 +45,19 @@ async function login(req, res) {
   }
 
   try {
-    const pool = await getPool();
+    const pool = getPool();
     if (!pool) return res.status(500).json({ message: "เชื่อมต่อฐานข้อมูลไม่สำเร็จ" });
 
     // 1) find user
-    const result = await pool
-      .request()
-      .input("username", sql.VarChar(50), username)
-      .query(`
-        SELECT TOP 1
-          u_id, u_username, u_password, u_type, u_active, u_name
-        FROM [user]
-        WHERE u_username = @username
-      `);
+    const [userRows] = await pool.query(
+      `SELECT u_id, u_username, u_password, u_type, u_active, u_name
+       FROM \`user\`
+       WHERE u_username = ?
+       LIMIT 1`,
+      [username]
+    );
 
-    const user = result.recordset?.[0];
+    const user = userRows[0];
     if (!user) return res.status(404).json({ message: "ไม่มีผู้ใช้นี้อยู่ในระบบ" });
     if (user.u_active !== 1) return res.status(403).json({ message: "บัญชีผู้ใช้ถูกปิดใช้งาน" });
 
@@ -73,10 +68,7 @@ async function login(req, res) {
 
     // 3) Validate credentials
     if (!isOperatorHH) {
-      // admin/manager/PC: must have password
-      if (!password) {
-        return res.status(400).json({ message: "กรุณากรอก password" });
-      }
+      if (!password) return res.status(400).json({ message: "กรุณากรอก password" });
 
       const mode = String(process.env.PASSWORD_MODE || "bcrypt").toLowerCase();
       let passOk = false;
@@ -87,37 +79,26 @@ async function login(req, res) {
         passOk = await bcrypt.compare(password, String(user.u_password || ""));
       }
 
-      if (!passOk) {
-        return res.status(401).json({ message: "รหัสผ่านไม่ถูกต้อง" });
-      }
+      if (!passOk) return res.status(401).json({ message: "รหัสผ่านไม่ถูกต้อง" });
     } else {
-      // operator/HH: must choose station (no password required)
-      if (!op_sta_id) {
-        return res.status(400).json({ message: "กรุณาเลือก station (op_sta_id)" });
-      }
+      if (!op_sta_id) return res.status(400).json({ message: "กรุณาเลือก station (op_sta_id)" });
     }
 
     // 4) If operator/HH -> lookup station name + active
     let op_sta_name = null;
 
     if (isOperatorHH) {
-      const staR = await pool
-        .request()
-        .input("op_sta_id", sql.VarChar(20), op_sta_id)
-        .query(`
-          SELECT TOP 1
-            op_sta_id,
-            op_sta_name,
-            CAST(op_sta_active AS INT) AS op_sta_active
-          FROM dbo.op_station
-          WHERE op_sta_id = @op_sta_id
-        `);
+      const [staRows] = await pool.query(
+        `SELECT op_sta_id, op_sta_name, CAST(op_sta_active AS UNSIGNED) AS op_sta_active
+         FROM op_station
+         WHERE op_sta_id = ?
+         LIMIT 1`,
+        [op_sta_id]
+      );
 
-      const sta = staR.recordset?.[0];
+      const sta = staRows[0];
       if (!sta) return res.status(400).json({ message: "ไม่พบ station" });
-      if (Number(sta.op_sta_active) !== 1) {
-        return res.status(400).json({ message: "station ถูกปิดใช้งาน" });
-      }
+      if (Number(sta.op_sta_active) !== 1) return res.status(400).json({ message: "station ถูกปิดใช้งาน" });
 
       op_sta_name = sta.op_sta_name || null;
     }
@@ -130,62 +111,58 @@ async function login(req, res) {
     const tokenAccess = crypto.randomBytes(48).toString("base64url");
     let tokenId = null;
 
-    const tx = new sql.Transaction(pool);
-    await tx.begin();
+    const conn = await pool.getConnection();
+    await conn.beginTransaction();
 
     try {
-      const y = now.getFullYear();
-      const m = String(now.getMonth() + 1).padStart(2, "0");
-      const d = String(now.getDate()).padStart(2, "0");
+      const y      = now.getFullYear();
+      const m      = String(now.getMonth() + 1).padStart(2, "0");
+      const d      = String(now.getDate()).padStart(2, "0");
       const prefix = `AC${y}${m}${d}`;
 
-      const last = await new sql.Request(tx)
-        .input("likePrefix", sql.VarChar(30), `${prefix}%`)
-        .query(`
-          SELECT TOP 1 a_id
-          FROM access WITH (UPDLOCK, HOLDLOCK)
-          WHERE a_id LIKE @likePrefix
-          ORDER BY a_id DESC
-        `);
+      const [lastRows] = await conn.query(
+        `SELECT a_id FROM \`access\`
+         WHERE a_id LIKE ?
+         ORDER BY a_id DESC
+         LIMIT 1`,
+        [`${prefix}%`]
+      );
 
       let running = 1;
-      if (last.recordset?.length > 0) {
-        const lastId = String(last.recordset[0].a_id || "");
-        const tail = lastId.slice(prefix.length);
-        const n = parseInt(tail, 10);
+      if (lastRows.length > 0) {
+        const lastId = String(lastRows[0].a_id || "");
+        const tail   = lastId.slice(prefix.length);
+        const n      = parseInt(tail, 10);
         if (!Number.isNaN(n)) running = n + 1;
       }
 
       const suffix = String(running).padStart(4, "0");
-      const a_id = `${prefix}${suffix}`;
-      tokenId = a_id;
+      const a_id   = `${prefix}${suffix}`;
+      tokenId      = a_id;
 
-      const exists = await new sql.Request(tx)
-        .input("a_token", sql.NVarChar(255), tokenAccess)
-        .query(`SELECT TOP 1 a_id FROM access WHERE a_token = @a_token`);
+      const [existsRows] = await conn.query(
+        `SELECT a_id FROM \`access\` WHERE a_token = ? LIMIT 1`,
+        [tokenAccess]
+      );
 
-      if (exists.recordset?.length > 0) {
-        await tx.rollback();
+      if (existsRows.length > 0) {
+        await conn.rollback();
+        conn.release();
         return res.status(500).json({ message: "ระบบสร้าง token ซ้ำ กรุณาลองใหม่อีกครั้ง" });
       }
 
       // ✅ store a_op_sta_id (NULL for non-operator or non-HH)
-      await new sql.Request(tx)
-        .input("a_id", sql.VarChar(20), a_id)
-        .input("u_id", sql.VarChar(20), String(user.u_id))
-        .input("a_token", sql.NVarChar(255), tokenAccess)
-        .input("a_created", sql.DateTime2(3), now)
-        .input("a_expired", sql.DateTime2(3), expiresAt)
-        .input("a_client_type", sql.VarChar(20), safeClientType)
-        .input("a_op_sta_id", sql.VarChar(20), isOperatorHH ? op_sta_id : null)
-        .query(`
-          INSERT INTO access (a_id, u_id, a_token, a_created, a_expired, a_client_type, a_op_sta_id)
-          VALUES (@a_id, @u_id, @a_token, @a_created, @a_expired, @a_client_type, @a_op_sta_id)
-        `);
+      await conn.query(
+        `INSERT INTO \`access\` (a_id, u_id, a_token, a_created, a_expired, a_client_type, a_op_sta_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [a_id, String(user.u_id), tokenAccess, now, expiresAt, safeClientType, isOperatorHH ? op_sta_id : null]
+      );
 
-      await tx.commit();
+      await conn.commit();
+      conn.release();
     } catch (e) {
-      await tx.rollback();
+      await conn.rollback();
+      conn.release();
       throw e;
     }
 
@@ -196,15 +173,15 @@ async function login(req, res) {
     // ✅ response: add op_sta_name
     return res.json({
       tokenAccess,
-      clientType: safeClientType,
+      clientType:     safeClientType,
       tokenExpiresAt: expiresAt.toISOString(),
       tokenId,
       userInfo: {
-        u_id: String(user.u_id),
-        u_name: user.u_name,
-        u_type: user.u_type,
+        u_id:        String(user.u_id),
+        u_name:      user.u_name,
+        u_type:      user.u_type,
         role,
-        op_sta_id: isOperatorHH ? op_sta_id : null,
+        op_sta_id:   isOperatorHH ? op_sta_id   : null,
         op_sta_name: isOperatorHH ? op_sta_name : null,
       },
     });
@@ -213,19 +190,19 @@ async function login(req, res) {
     return res.status(500).json({ message: "เกิดข้อผิดพลาดของเซิร์ฟเวอร์" });
   }
 }
+
 // POST /api/auth/logout
 async function logout(req, res) {
-  const auth = req.headers.authorization || "";
+  const auth  = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
 
   try {
-    const pool = await getPool();
+    const pool = getPool();
     if (!pool) {
       console.log("[LOGOUT] db connection failed");
       return res.status(500).json({ ok: false, message: "เชื่อมต่อฐานข้อมูลไม่สำเร็จ" });
     }
 
-    // ไม่มี token ก็ให้ถือว่า logout สำเร็จ
     if (!token) {
       console.log("[LOGOUT] missing token -> ok");
       return res.status(200).json({ ok: true, message: "ออกจากระบบสำเร็จ", expiredRows: 0 });
@@ -233,26 +210,18 @@ async function logout(req, res) {
 
     const now = new Date();
 
-    const result = await pool
-      .request()
-      .input("a_token", sql.NVarChar(255), token)
-      .input("now", sql.DateTime2(3), now)
-      .query(`
-        UPDATE access
-        SET a_expired = @now
-        WHERE a_token = @a_token
-          AND a_expired > @now
-      `);
+    const [result] = await pool.query(
+      `UPDATE \`access\`
+       SET a_expired = ?
+       WHERE a_token = ?
+         AND a_expired > ?`,
+      [now, token, now]
+    );
 
-    const expiredRows = result.rowsAffected?.[0] || 0;
-
+    const expiredRows = result.affectedRows || 0;
     console.log(`[LOGOUT] token=${token.slice(0, 8)}... expiredRows=${expiredRows}`);
 
-    return res.status(200).json({
-      ok: true,
-      message: "ออกจากระบบสำเร็จ",
-      expiredRows,
-    });
+    return res.status(200).json({ ok: true, message: "ออกจากระบบสำเร็จ", expiredRows });
   } catch (err) {
     console.log("[LOGOUT] error:", err);
     return res.status(500).json({ ok: false, message: "เกิดข้อผิดพลาดของเซิร์ฟเวอร์" });
@@ -262,9 +231,9 @@ async function logout(req, res) {
 async function createUser(req, res) {
   const username = String(req.body.username || "").trim();
   const password = String(req.body.password || "").trim();
-  const name = String(req.body.name || "").trim();
-  const u_type = String(req.body.u_type || "").trim();
-  const active = req.body.active === undefined ? 1 : Number(req.body.active);
+  const name     = String(req.body.name     || "").trim();
+  const u_type   = String(req.body.u_type   || "").trim();
+  const active   = req.body.active === undefined ? 1 : Number(req.body.active);
 
   if (!username || !password || !name || !u_type) {
     return res.status(400).json({ message: "กรุณากรอก username, password, name, u_type" });
@@ -275,63 +244,53 @@ async function createUser(req, res) {
   }
 
   try {
-    const pool = await getPool();
+    const pool = getPool();
     if (!pool) return res.status(500).json({ message: "เชื่อมต่อฐานข้อมูลไม่สำเร็จ" });
 
-    const dup = await pool
-      .request()
-      .input("username", sql.VarChar(50), username)
-      .query(`SELECT TOP 1 u_id FROM [user] WHERE u_username = @username`);
+    const [dupRows] = await pool.query(
+      `SELECT u_id FROM \`user\` WHERE u_username = ? LIMIT 1`,
+      [username]
+    );
 
-    if (dup.recordset.length > 0) {
+    if (dupRows.length > 0) {
       return res.status(409).json({ message: "username นี้มีอยู่แล้ว" });
     }
 
     const hashed = await bcrypt.hash(password, 10);
-    const now = new Date();
+    const now    = new Date();
 
-    const tx = new sql.Transaction(pool);
-    await tx.begin();
+    const conn = await pool.getConnection();
+    await conn.beginTransaction();
 
     try {
-      const nextIdResult = await new sql.Request(tx).query(`
-        SELECT ISNULL(MAX(u_id), 0) + 1 AS nextId
-        FROM [user] WITH (UPDLOCK, HOLDLOCK)
-      `);
+      const [maxRows] = await conn.query(
+        `SELECT IFNULL(MAX(u_id), 0) + 1 AS nextId FROM \`user\``
+      );
+      const nextId = maxRows[0].nextId;
 
-      const nextId = nextIdResult.recordset[0].nextId;
+      await conn.query(
+        `INSERT INTO \`user\` (u_id, u_username, u_password, u_name, u_type, u_active, u_created_ts, u_updated_ts)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [nextId, username, hashed, name, u_type, active, now, now]
+      );
 
-      await new sql.Request(tx)
-        .input("u_id", sql.Int, nextId)
-        .input("u_username", sql.VarChar(50), username)
-        .input("u_password", sql.VarChar(255), hashed) // hash stored in DB
-        .input("u_name", sql.NVarChar(255), name)
-        .input("u_type", sql.VarChar(2), u_type)
-        .input("u_active", sql.Int, active)
-        .input("u_created_ts", sql.DateTime2(3), now)
-        .input("u_updated_ts", sql.DateTime2(3), now)
-        .query(`
-          INSERT INTO [user]
-            (u_id, u_username, u_password, u_name, u_type, u_active, u_created_ts, u_updated_ts)
-          VALUES
-            (@u_id, @u_username, @u_password, @u_name, @u_type, @u_active, @u_created_ts, @u_updated_ts)
-        `);
-
-      await tx.commit();
+      await conn.commit();
+      conn.release();
 
       return res.status(201).json({
         message: "สร้างผู้ใช้สำเร็จ",
         user: {
-          u_id: nextId,
+          u_id:      nextId,
           u_username: username,
-          password: "hash password",
-          u_name: name,
+          password:  "hash password",
+          u_name:    name,
           u_type,
-          u_active: active,
+          u_active:  active,
         },
       });
     } catch (e) {
-      await tx.rollback();
+      await conn.rollback();
+      conn.release();
       throw e;
     }
   } catch (err) {
@@ -345,13 +304,12 @@ async function createUser(req, res) {
 // - active -> u_active (0/1)
 // และยังรองรับ u_type/u_active แบบเดิมด้วย
 async function getAllUsers(req, res) {
-  const q = String(req.query.q || "").trim(); // search u_username/u_name
+  const q = String(req.query.q || "").trim();
 
   // ✅ [เพิ่ม] alias: type/active (fallback ไปหา u_type/u_active)
-  const type = String(req.query.type || req.query.u_type || "").trim(); // op/ad/ma
-
+  const type      = String(req.query.type || req.query.u_type || "").trim();
   const activeRaw = req.query.active !== undefined ? req.query.active : req.query.u_active;
-  const active = activeRaw === undefined ? null : Number(activeRaw); // 0/1
+  const active    = activeRaw === undefined ? null : Number(activeRaw);
 
   // ✅ [เพิ่ม] validate type ถ้ามีส่งมา
   if (type && !["op", "ad", "ma"].includes(type)) {
@@ -364,42 +322,36 @@ async function getAllUsers(req, res) {
   }
 
   try {
-    const pool = await getPool();
+    const pool = getPool();
     if (!pool) return res.status(500).json({ message: "เชื่อมต่อฐานข้อมูลไม่สำเร็จ" });
 
-    let where = "WHERE 1=1";
-    const r = pool.request();
+    let where  = "WHERE 1=1";
+    const params = [];
 
     if (q) {
-      where += " AND (u_username LIKE @q OR u_name LIKE @q)";
-      r.input("q", sql.NVarChar(255), `%${q}%`);
+      where += " AND (u_username LIKE ? OR u_name LIKE ?)";
+      params.push(`%${q}%`, `%${q}%`);
     }
 
     if (type) {
-      where += " AND u_type = @u_type";
-      r.input("u_type", sql.VarChar(2), type);
+      where += " AND u_type = ?";
+      params.push(type);
     }
 
     if (active === 0 || active === 1) {
-      where += " AND u_active = @u_active";
-      r.input("u_active", sql.Int, active);
+      where += " AND u_active = ?";
+      params.push(active);
     }
 
-    const result = await r.query(`
-      SELECT
-        u_id,
-        u_username,
-        u_name,
-        u_type,
-        u_active,
-        u_created_ts,
-        u_updated_ts
-      FROM [user]
-      ${where}
-      ORDER BY u_id ASC
-    `);
+    const [rows] = await pool.query(
+      `SELECT u_id, u_username, u_name, u_type, u_active, u_created_ts, u_updated_ts
+       FROM \`user\`
+       ${where}
+       ORDER BY u_id ASC`,
+      params
+    );
 
-    return res.json({ message: "success", users: result.recordset });
+    return res.json({ message: "success", users: rows });
   } catch (err) {
     console.error("GET ALL USERS ERROR:", err);
     return res.status(500).json({ message: "เกิดข้อผิดพลาดของเซิร์ฟเวอร์" });
@@ -414,31 +366,18 @@ async function getUsersByType(req, res) {
   }
 
   try {
-    const pool = await getPool();
+    const pool = getPool();
     if (!pool) return res.status(500).json({ message: "เชื่อมต่อฐานข้อมูลไม่สำเร็จ" });
 
-    const result = await pool
-      .request()
-      .input("u_type", sql.VarChar(2), u_type)
-      .query(`
-        SELECT
-          u_id,
-          u_username,
-          u_name,
-          u_type,
-          u_active,
-          u_created_ts,
-          u_updated_ts
-        FROM [user]
-        WHERE u_type = @u_type
-        ORDER BY u_id ASC
-      `);
+    const [rows] = await pool.query(
+      `SELECT u_id, u_username, u_name, u_type, u_active, u_created_ts, u_updated_ts
+       FROM \`user\`
+       WHERE u_type = ?
+       ORDER BY u_id ASC`,
+      [u_type]
+    );
 
-    return res.json({
-      message: "success",
-      u_type,
-      users: result.recordset,
-    });
+    return res.json({ message: "success", u_type, users: rows });
   } catch (err) {
     console.error("GET USERS BY TYPE ERROR:", err);
     return res.status(500).json({ message: "เกิดข้อผิดพลาดของเซิร์ฟเวอร์" });

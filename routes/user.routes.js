@@ -11,7 +11,7 @@ const {
   updateUser,
 } = require("../controllers/user.controller");
 
-// POST /api/users — สร้าง user (admin/manager)
+// POST /api/users — สร้าง user (admin)
 router.post("/users",
   requireAuth,
   requireRole(["admin"]),

@@ -1,4 +1,4 @@
-const { sql, getPool } = require("../config/db");
+const { getPool } = require("../config/db");
 
 function mapUserTypeToRole(u_type) {
   if (u_type === "op") return "operator";
@@ -14,23 +14,19 @@ function normalizeClientType(raw) {
 }
 
 async function requireAuth(req, res, next) {
-  const auth = req.headers.authorization || "";
+  const auth  = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : null;
 
   if (!token) return res.status(401).json({ message: "Missing token" });
 
   try {
-    const pool = await getPool();
+    const pool = getPool();
     if (!pool) return res.status(500).json({ message: "Database connection failed" });
 
     const now = new Date();
 
-    const result = await pool
-      .request()
-      .input("a_token", sql.NVarChar(500), token)
-      .input("now",     sql.DateTime2(3),  now)
-      .query(`
-        SELECT TOP 1
+    const [rows] = await pool.query(
+      `SELECT
           a.u_id,
           a.a_created,
           a.a_expired,
@@ -41,17 +37,19 @@ async function requireAuth(req, res, next) {
           u.u_type,
           u.u_active,
           s.op_sta_name,
-          CAST(s.op_sta_active AS INT) AS op_sta_active
-        FROM access a
-        JOIN [user] u ON u.u_id = a.u_id
-        LEFT JOIN dbo.op_station s
-          ON s.op_sta_id = LTRIM(RTRIM(a.a_op_sta_id))
-        WHERE a.a_token  = @a_token
-          AND a.a_expired > @now
+          CAST(s.op_sta_active AS UNSIGNED) AS op_sta_active
+        FROM \`access\` a
+        JOIN \`user\` u ON u.u_id = a.u_id
+        LEFT JOIN op_station s
+          ON s.op_sta_id = TRIM(a.a_op_sta_id)
+        WHERE a.a_token   = ?
+          AND a.a_expired > ?
         ORDER BY a.a_created DESC
-      `);
+        LIMIT 1`,
+      [token, now]
+    );
 
-    const row = result.recordset?.[0];
+    const row = rows[0];
     if (!row) {
       return res.status(401).json({ message: "Token expired or invalid, please login again" });
     }
@@ -65,17 +63,17 @@ async function requireAuth(req, res, next) {
     );
 
     req.user = {
-      u_id:            String(row.u_id),
-      u_username:      row.u_username,
-      u_name:          row.u_name,
-      u_type:          row.u_type,
-      role:            mapUserTypeToRole(row.u_type),
-      clientType:      normalizeClientType(row.a_client_type),
+      u_id:             String(row.u_id),
+      u_username:       row.u_username,
+      u_name:           row.u_name,
+      u_type:           row.u_type,
+      role:             mapUserTypeToRole(row.u_type),
+      clientType:       normalizeClientType(row.a_client_type),
       requestClientType,
-      tokenExpiresAt:  row.a_expired,
-      op_sta_id:       row.a_op_sta_id ? String(row.a_op_sta_id).trim() : null,
-      op_sta_name:     row.op_sta_name  || null,
-      op_sta_active:   row.op_sta_active === null ? null : Number(row.op_sta_active),
+      tokenExpiresAt:   row.a_expired,
+      op_sta_id:        row.a_op_sta_id ? String(row.a_op_sta_id).trim() : null,
+      op_sta_name:      row.op_sta_name  || null,
+      op_sta_active:    row.op_sta_active === null ? null : Number(row.op_sta_active),
     };
 
     next();
