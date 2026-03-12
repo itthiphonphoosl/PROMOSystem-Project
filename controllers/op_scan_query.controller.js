@@ -391,7 +391,7 @@ if (Number(head.tk_active) !== 1 && actor.u_type === "op") {
     )];
 
     const tk_status_label = {
-      0: "NOT_STARTED", 1: "FINISHED", 2: "PARTIAL_DONE", 3: "IN_PROGRESS",
+      0: "NOT_STARTED", 1: "FINISHED", 2: "PARTIAL_DONE", 3: "IN_PROGRESS", 4: "CANCELLED",
     }[head.tk_status] ?? "UNKNOWN";
 
    return res.json({
