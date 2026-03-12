@@ -32,11 +32,10 @@ exports.listColors = async (req, res) => {
         color_id, color_no, color_name, color_status,
         CASE color_status WHEN 1 THEN 'Active' WHEN 0 THEN 'Inactive' END AS color_status_label
       FROM ${SAFE_COLOR}
-      ${showAll ? "" : "WHERE color_status = 1"}
       ORDER BY color_id ASC
     `);
 
-    return res.json({ actor, show_all: showAll, count: rows.length, items: rows });
+    return res.json({ actor, count: rows.length, items: rows });
   } catch (err) {
     console.error("[COLOR_LIST][ERROR]", err);
     return res.status(500).json({ message: "List colors failed", actor, error: err.message });
@@ -135,5 +134,52 @@ exports.updateColor = async (req, res) => {
   } catch (err) {
     console.error("[COLOR_UPDATE][ERROR]", err);
     return res.status(500).json({ message: "Update color failed", actor, error: err.message });
+  }
+};
+// POST /api/colors
+exports.createColor = async (req, res) => {
+  const actor = actorOf(req);
+  const { color_no, color_name, color_status } = req.body ?? {};
+
+  if (!color_no || !String(color_no).trim()) {
+    return res.status(400).json({ message: "กรุณาระบุ color_no", actor });
+  }
+  if (!color_name || !String(color_name).trim()) {
+    return res.status(400).json({ message: "กรุณาระบุ color_name", actor });
+  }
+
+  const status = color_status !== undefined ? Number(color_status) : 1;
+  if (status !== 0 && status !== 1) {
+    return res.status(400).json({ message: "color_status ต้องเป็น 0 หรือ 1 เท่านั้น", actor });
+  }
+
+  try {
+    const pool = getPool();
+
+    // ตรวจ duplicate color_no
+    const [dup] = await pool.query(
+      `SELECT color_id FROM ${SAFE_COLOR} WHERE color_no = ? LIMIT 1`,
+      [String(color_no).trim()]
+    );
+    if (dup[0]) {
+      return res.status(409).json({ message: `color_no "${color_no}" มีอยู่ในระบบแล้ว`, actor });
+    }
+
+    const [result] = await pool.query(
+      `INSERT INTO ${SAFE_COLOR} (color_no, color_name, color_status) VALUES (?, ?, ?)`,
+      [String(color_no).trim(), String(color_name).trim(), status]
+    );
+
+    const [newRow] = await pool.query(
+      `SELECT color_id, color_no, color_name, color_status,
+              CASE color_status WHEN 1 THEN 'Active' WHEN 0 THEN 'Inactive' END AS color_status_label
+       FROM ${SAFE_COLOR} WHERE color_id = ?`,
+      [result.insertId]
+    );
+
+    return res.status(201).json({ actor, message: "เพิ่มสีสำเร็จ", item: newRow[0] });
+  } catch (err) {
+    console.error("[COLOR_CREATE][ERROR]", err);
+    return res.status(500).json({ message: "Create color failed", actor, error: err.message });
   }
 };

@@ -147,7 +147,7 @@ exports.getOpScanById = async (req, res) => {
 exports.getActiveOpScanByTkId = async (req, res) => {
   const actor  = actorOf(req);
   const tk_id  = String(req.params.tk_id || req.params.tkId || req.params.id || "").trim();
-  if (!tk_id) return res.status(400).json({ message: "tk_id is required", actor });
+  if (!tk_id) return res.status(400).json({ message: "กรุณากรอก Tracking No.", actor });
 
   const isOperator = actor.u_type === "op";
   const opSta      = actor.op_sta_id ? String(actor.op_sta_id).trim() : "";
@@ -165,7 +165,7 @@ exports.getActiveOpScanByTkId = async (req, res) => {
         [tk_id]
       );
       if (!tkHead) {
-        return res.status(404).json({ message: "tk_id not found", actor, tk_id });
+        return res.status(404).json({ message: "ไม่พบ Tracking No. นี้ในระบบ", actor, tk_id });
       }
       if (Number(tkHead.tk_active) !== 1) {
         return res.status(403).json({
@@ -226,7 +226,7 @@ exports.getActiveOpScanByTkId = async (req, res) => {
 exports.getTkSummary = async (req, res) => {
   const actor = actorOf(req);
   const tk_id = String(req.params.tk_id || "").trim();
-  if (!tk_id) return res.status(400).json({ message: "tk_id is required", actor });
+  if (!tk_id) return res.status(400).json({ message: "กรุณากรอก Tracking No.", actor });
 
   try {
     const pool = getPool();
@@ -239,7 +239,7 @@ const [headRows] = await pool.query(
   [tk_id]
 );
 const head = headRows[0];
-if (!head) return res.status(404).json({ message: "tk_id not found", actor, tk_id });
+if (!head) return res.status(404).json({ message: "ไม่พบ Tracking No. นี้ ไม่มีอยู่ในระบบ", actor, tk_id });
 // ✅ เพิ่ม: block operator ถ้าเอกสารถูกปิด
 if (Number(head.tk_active) !== 1 && actor.u_type === "op") {
   return res.status(403).json({ message: "เอกสารนี้ถูกปิดใช้งานอยู่ กรุณาติดต่อ Admin", actor, tk_id, tk_active: Number(head.tk_active) });

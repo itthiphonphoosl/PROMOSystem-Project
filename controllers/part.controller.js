@@ -117,3 +117,48 @@ exports.updatePart = async (req, res) => {
     return res.status(500).json({ message: "Update part failed", error: err.message });
   }
 };
+// POST /api/parts
+exports.createPart = async (req, res) => {
+  const { part_no, part_name, part_status } = req.body ?? {};
+
+  if (!part_no || !String(part_no).trim()) {
+    return res.status(400).json({ message: "กรุณาระบุ part_no" });
+  }
+  if (!part_name || !String(part_name).trim()) {
+    return res.status(400).json({ message: "กรุณาระบุ part_name" });
+  }
+
+  const status = part_status !== undefined ? Number(part_status) : 1;
+  if (status !== 0 && status !== 1) {
+    return res.status(400).json({ message: "part_status ต้องเป็น 0 หรือ 1 เท่านั้น" });
+  }
+
+  try {
+    const pool = getPool();
+
+    // ตรวจ duplicate part_no
+    const [dup] = await pool.query(
+      `SELECT part_id FROM ${SAFE_PART} WHERE part_no = ? LIMIT 1`,
+      [String(part_no).trim()]
+    );
+    if (dup[0]) {
+      return res.status(409).json({ message: `part_no "${part_no}" มีอยู่ในระบบแล้ว` });
+    }
+
+    const [result] = await pool.query(
+      `INSERT INTO ${SAFE_PART} (part_no, part_name, part_status) VALUES (?, ?, ?)`,
+      [String(part_no).trim(), String(part_name).trim(), status]
+    );
+
+    const [newRow] = await pool.query(
+      `SELECT part_id, part_no, part_name, part_status,
+              CASE part_status WHEN 1 THEN 'Active' WHEN 0 THEN 'Inactive' END AS part_status_label
+       FROM ${SAFE_PART} WHERE part_id = ?`,
+      [result.insertId]
+    );
+
+    return res.status(201).json({ message: "เพิ่ม part สำเร็จ", item: newRow[0] });
+  } catch (err) {
+    return res.status(500).json({ message: "Create part failed", error: err.message });
+  }
+};

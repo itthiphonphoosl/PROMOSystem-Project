@@ -161,8 +161,8 @@ exports.startOpScan = async (req, res) => {
 
   const tk_id = String(req.body.tk_id || "").trim();
   const MC_id = String(req.body.MC_id || "").trim();
-  if (!tk_id) return res.status(400).json({ message: "tk_id is required", actor });
-  if (!MC_id) return res.status(400).json({ message: "MC_id is required", actor });
+  if (!tk_id) return res.status(400).json({ message: "กรุณากรอก Tracking No.", actor });
+  if (!MC_id) return res.status(400).json({ message: "กรุณาเลือก Machine", actor });
 
   const pool = getPool();
   const conn = await pool.getConnection();
@@ -183,16 +183,20 @@ const headRow    = headRows[0];
 const headStatus = Number(headRow?.tk_status ?? -1);
 if (headStatus === -1) {
   await conn.rollback(); conn.release();
-  return res.status(404).json({ message: "tk_id not found", actor, tk_id });
+  return res.status(404).json({ message: "ไม่พบ Tracking No. นี้ในระบบ", actor, tk_id });
 }
 // ✅ เพิ่ม: block ถ้าเอกสารถูกปิด
 if (Number(headRow?.tk_active) !== 1) {
   await conn.rollback(); conn.release();
   return res.status(403).json({ message: "เอกสารนี้ถูกปิดใช้งานอยู่ กรุณาติดต่อ Admin", actor, tk_id, tk_active: Number(headRow?.tk_active) });
 }
+if (headStatus === 4) {
+  await conn.rollback(); conn.release();
+  return res.status(403).json({ message: "เอกสาร Tracking No. นี้ถูก Cancel ไปแล้ว", actor, tk_id });
+}
 if (headStatus === 1) {
   await conn.rollback(); conn.release();
-  return res.status(403).json({ message: "This tk_id is FINISHED. Cannot start.", actor, tk_id });
+  return res.status(403).json({ message: "Tracking No. นี้ดำเนินการเสร็จสิ้นแล้ว ไม่สามารถเริ่มงานได้", actor, tk_id });
 }
 
       // ② TKDetail
@@ -210,7 +214,7 @@ if (headStatus === 1) {
       const tkDoc = tkDetailRows[0];
       if (!tkDoc) {
         await conn.rollback(); conn.release();
-        return res.status(404).json({ message: "tk_id not found in TKDetail", actor, tk_id });
+        return res.status(404).json({ message: "ไม่พบข้อมูล TKDetail ของ Tracking No. นี้", actor, tk_id });
       }
 
       // ③ base lot (จาก TKRunLog)
@@ -301,7 +305,7 @@ if (headStatus === 1) {
       const mcRow = mcRows[0];
       if (!mcRow) {
         await conn.rollback(); conn.release();
-        return res.status(400).json({ message: "MC_id not found or inactive", actor, MC_id });
+        return res.status(400).json({ message: "ไม่พบ Machine หรือ Machine ถูกปิดใช้งาน", actor, MC_id });
       }
       if (String(mcRow.op_sta_id || "").trim() !== op_sta_id) {
         await conn.rollback(); conn.release();
@@ -322,7 +326,7 @@ if (headStatus === 1) {
       );
       if (activeRows[0]) {
         await conn.rollback(); conn.release();
-        return res.status(409).json({ message: "tk_id นี้มี active scan อยู่แล้ว", actor, tk_id, op_sc_id: activeRows[0].op_sc_id });
+        return res.status(409).json({ message: "Tracking No. นี้มี active scan อยู่แล้ว", actor, tk_id, op_sc_id: activeRows[0].op_sc_id });
       }
 
       // ⑧ gen op_sc_id + INSERT

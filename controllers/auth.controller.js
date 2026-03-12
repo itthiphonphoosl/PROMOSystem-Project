@@ -265,16 +265,15 @@ async function createUser(req, res) {
     await conn.beginTransaction();
 
     try {
-      const [maxRows] = await conn.query(
-        `SELECT IFNULL(MAX(u_id), 0) + 1 AS nextId FROM \`user\``
-      );
-      const nextId = maxRows[0].nextId;
-
+      // AUTO_INCREMENT -- MySQL generates u_id automatically
       await conn.query(
-        `INSERT INTO \`user\` (u_id, u_username, u_password, u_firstname, u_lastname, u_type, u_active, u_created_ts, u_updated_ts)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [nextId, username, hashed, firstname, lastname, u_type, active, now, now]
+        `INSERT INTO \`user\` (u_username, u_password, u_firstname, u_lastname, u_type, u_active, u_created_ts, u_updated_ts)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [username, hashed, firstname, lastname, u_type, active, now, now]
       );
+
+      const [[newRow]] = await conn.query(`SELECT LAST_INSERT_ID() AS u_id`);
+      const nextId = newRow.u_id;
 
       await conn.commit();
       conn.release();

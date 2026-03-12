@@ -112,7 +112,7 @@ exports.createTkDoc = async (req, res) => {
     );
     const partRow = partRows[0];
     if (!partRow) {
-      return res.status(400).json({ message: "Create failed: part_no not found", actor, error: `part_no not found: ${part_no}` });
+      return res.status(400).json({ message: "Create failed: ไม่พบ part_no ", actor, error: `part_no ในระบบนี้: ${part_no}` });
     }
 
     const conn = await pool.getConnection();
@@ -362,7 +362,7 @@ exports.updateTkDoc = async (req, res) => {
       [tk_id]
     );
     if (!headRows[0]) {
-      return res.status(404).json({ message: "TK Document not found", tk_id, actor });
+      return res.status(404).json({ message: "Tracking No. นี้ไม่พบในระบบ", tk_id, actor });
     }
 
     // 2) Guard
@@ -464,11 +464,11 @@ exports.updateTkDoc = async (req, res) => {
 // ---------------------------------------------------------------------------
 // DELETE /api/TKDocs/:id  (admin only)
 //
-// Guard (assertEditable):
-//   1. TKDetail.MC_id IS NULL AND TKDetail.op_sta_id IS NULL
-//   2. ไม่มี Transfer record เลย (COUNT = 0)
-//
-// ลำดับการลบ: TKDetail -> TKRunLog -> TKHead
+// Rules:
+//   - tk_status != 0           → 409 ไม่สามารถลบ/ยกเลิกได้
+//   - tk_status == 0 + เป็น tk_id ล่าสุด → Hard Delete (ลบออกจาก DB จริง)
+//   - tk_status == 0 + ไม่ใช่ล่าสุด      → Soft Cancel (tk_status = 4)
+//     (เพื่อไม่ให้ running number เคลื่อน)
 // ---------------------------------------------------------------------------
 exports.deleteTkDoc = async (req, res) => {
   const actor = actorOf(req);
@@ -478,26 +478,39 @@ exports.deleteTkDoc = async (req, res) => {
     return res.status(403).json({ message: "Forbidden (admin only)", actor });
   }
   if (!tk_id) {
-    return res.status(400).json({ message: "tk_id is required", actor });
+    return res.status(400).json({ message: "กรุณาระบุ Tracking No.", actor });
   }
 
   try {
     const pool = getPool();
 
+    // 1) ดึง TKHead
     const [headRows] = await pool.query(
       `SELECT tk_id, tk_status, tk_active FROM ${SAFE_TKHEAD} WHERE tk_id = ? LIMIT 1`,
       [tk_id]
     );
-    if (!headRows[0]) {
-      return res.status(404).json({ message: "TK Document not found", tk_id, actor });
+    const head = headRows[0];
+    if (!head) {
+      return res.status(404).json({ message: "Tracking No. นี้ไม่พบในระบบ", tk_id, actor });
     }
 
-    const guard = await assertEditable(pool, tk_id);
-    if (!guard.ok) {
-      return res.status(409).json({ message: guard.reason, detail: guard.detail, actor });
+    // 2) tk_status != 0 → block ทันที (1=กำลังดำเนินการ, 2=ผ่านบางสถานี, 3=เสร็จสิ้น)
+    if (Number(head.tk_status) !== 0) {
+      return res.status(409).json({
+        message: `ไม่สามารถลบ/ยกเลิกได้ เอกสารนี้มี tk_status = ${head.tk_status} (ดำเนินการไปแล้ว)`,
+        tk_id,
+        tk_status: head.tk_status,
+        actor,
+      });
     }
 
-    // ดึงข้อมูลเอกสารก่อนลบ เพื่อใส่ใน response
+    // 3) เช็คว่าเป็น tk_id ล่าสุดในระบบหรือไม่
+    const [[{ latest_tk_id }]] = await pool.query(
+      `SELECT tk_id AS latest_tk_id FROM ${SAFE_TKHEAD} ORDER BY tk_id DESC LIMIT 1`
+    );
+    const isLatest = (tk_id === latest_tk_id);
+
+    // 4) ดึง detail + runlog เพื่อใส่ใน response
     const [detailRows] = await pool.query(
       `SELECT d.part_id, p.part_no, p.part_name, d.lot_no
        FROM ${SAFE_TKDETAIL} d
@@ -517,25 +530,51 @@ exports.deleteTkDoc = async (req, res) => {
     await conn.beginTransaction();
 
     try {
-      await conn.query(`DELETE FROM ${SAFE_TKDETAIL} WHERE tk_id = ?`, [tk_id]);
-      await conn.query(`DELETE FROM \`TKRunLog\`     WHERE tk_id = ?`, [tk_id]);
-      await conn.query(`DELETE FROM ${SAFE_TKHEAD}   WHERE tk_id = ?`, [tk_id]);
+      if (isLatest) {
+        // ── Hard Delete: ลบออกจาก DB จริง ──
+        await conn.query(`DELETE FROM ${SAFE_TKDETAIL} WHERE tk_id = ?`, [tk_id]);
+        await conn.query(`DELETE FROM \`TKRunLog\`     WHERE tk_id = ?`, [tk_id]);
+        await conn.query(`DELETE FROM ${SAFE_TKHEAD}   WHERE tk_id = ?`, [tk_id]);
 
-      await conn.commit();
-      conn.release();
+        await conn.commit();
+        conn.release();
 
-      console.log(`[TKDOC_DELETE] tk_id=${tk_id} deleted_by=${actor.u_id} (${actor.u_firstname} ${actor.u_lastname})`);
+        console.log(`[TKDOC_HARD_DELETE] tk_id=${tk_id} deleted_by=${actor.u_id}`);
 
-      return res.json({
-        message:   "Deleted TK Document",
-        tk_id,
-        part_id:   detail?.part_id   ?? null,
-        part_no:   detail?.part_no   ?? null,
-        part_name: detail?.part_name ?? null,
-        lot_no:    detail?.lot_no    ?? null,
-        run_no:    runlog?.run_no    ? String(runlog.run_no).trim() : null,
-        actor,
-      });
+        return res.json({
+          message:   "ลบ TK Document สำเร็จ (Hard Delete)",
+          action:    "hard_delete",
+          tk_id,
+          part_no:   detail?.part_no   ?? null,
+          part_name: detail?.part_name ?? null,
+          lot_no:    detail?.lot_no    ?? null,
+          run_no:    runlog?.run_no    ? String(runlog.run_no).trim() : null,
+          actor,
+        });
+
+      } else {
+        // ── Soft Cancel: เปลี่ยน tk_status = 4 ──
+        await conn.query(
+          `UPDATE ${SAFE_TKHEAD} SET tk_status = 4 WHERE tk_id = ?`,
+          [tk_id]
+        );
+
+        await conn.commit();
+        conn.release();
+
+        console.log(`[TKDOC_SOFT_CANCEL] tk_id=${tk_id} cancelled_by=${actor.u_id}`);
+
+        return res.json({
+          message:   "ยกเลิก TK Document สำเร็จ (Soft Cancel)",
+          action:    "soft_cancel",
+          tk_id,
+          tk_status: 4,
+          part_no:   detail?.part_no   ?? null,
+          part_name: detail?.part_name ?? null,
+          lot_no:    detail?.lot_no    ?? null,
+          actor,
+        });
+      }
     } catch (e) {
       await conn.rollback();
       conn.release();

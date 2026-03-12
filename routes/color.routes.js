@@ -43,4 +43,17 @@ router.put(
   colorController.updateColor
 );
 
+// ─────────────────────────────────────────────────────────
+// POST /api/colors
+// เพิ่มสีใหม่ — admin (PC) เท่านั้น
+// body: { color_no, color_name, color_status? }
+// ─────────────────────────────────────────────────────────
+router.post(
+  "/colors",
+  requireAuth,
+  requireRole(["admin"]),
+  requireClientType(["PC"]),
+  colorController.createColor
+);
+
 module.exports = router;
