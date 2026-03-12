@@ -497,6 +497,22 @@ exports.deleteTkDoc = async (req, res) => {
       return res.status(409).json({ message: guard.reason, detail: guard.detail, actor });
     }
 
+    // ดึงข้อมูลเอกสารก่อนลบ เพื่อใส่ใน response
+    const [detailRows] = await pool.query(
+      `SELECT d.part_id, p.part_no, p.part_name, d.lot_no
+       FROM ${SAFE_TKDETAIL} d
+       LEFT JOIN \`part\` p ON p.part_id = d.part_id
+       WHERE d.tk_id = ? LIMIT 1`,
+      [tk_id]
+    );
+    const detail = detailRows[0] ?? null;
+
+    const [runlogRows] = await pool.query(
+      `SELECT run_no FROM \`TKRunLog\` WHERE tk_id = ? ORDER BY created_at_ts ASC LIMIT 1`,
+      [tk_id]
+    );
+    const runlog = runlogRows[0] ?? null;
+
     const conn = await pool.getConnection();
     await conn.beginTransaction();
 
@@ -510,7 +526,16 @@ exports.deleteTkDoc = async (req, res) => {
 
       console.log(`[TKDOC_DELETE] tk_id=${tk_id} deleted_by=${actor.u_id} (${actor.u_firstname} ${actor.u_lastname})`);
 
-      return res.json({ message: "Deleted TK Document", tk_id, actor });
+      return res.json({
+        message:   "Deleted TK Document",
+        tk_id,
+        part_id:   detail?.part_id   ?? null,
+        part_no:   detail?.part_no   ?? null,
+        part_name: detail?.part_name ?? null,
+        lot_no:    detail?.lot_no    ?? null,
+        run_no:    runlog?.run_no    ? String(runlog.run_no).trim() : null,
+        actor,
+      });
     } catch (e) {
       await conn.rollback();
       conn.release();
