@@ -315,18 +315,47 @@ if (headStatus === 1) {
         });
       }
 
-      // ⑦ กัน active scan ซ้ำ
+      // ⑦ กัน active scan ซ้ำ — เริ่มที่ใครต้องเสร็จที่คนนั้น
       const [activeRows] = await conn.query(
-        `SELECT op_sc_id, op_sta_id FROM ${SAFE_OPSCAN}
-         WHERE tk_id = ? AND op_sc_finish_ts IS NULL
-         ORDER BY op_sc_ts DESC
+        `SELECT s.op_sc_id, s.op_sta_id, s.u_id,
+                u.u_firstname, u.u_lastname
+         FROM ${SAFE_OPSCAN} s
+         LEFT JOIN \`user\` u ON u.u_id = s.u_id
+         WHERE s.tk_id = ? AND s.op_sc_finish_ts IS NULL
+         ORDER BY s.op_sc_ts DESC
          LIMIT 1
          FOR UPDATE`,
         [tk_id]
       );
       if (activeRows[0]) {
+        const activeScan = activeRows[0];
+        const activeUId  = Number(activeScan.u_id);
+        const actorUId   = Number(actor.u_id);
+
+        if (activeUId === actorUId) {
+          // คนเดียวกัน → return scan เดิมได้เลย (reload หน้า finish)
+          await conn.rollback(); conn.release();
+          return res.status(200).json({
+            message: "resuming",
+            op_sc_id: activeScan.op_sc_id,
+            tk_id,
+            op_sta_id,
+            MC_id,
+            actor,
+            resuming: true,
+          });
+        }
+
+        // คนอื่น → block พร้อมบอกชื่อ
         await conn.rollback(); conn.release();
-        return res.status(409).json({ message: "Tracking No. นี้มี active scan อยู่แล้ว", actor, tk_id, op_sc_id: activeRows[0].op_sc_id });
+        const ownerName = [activeScan.u_firstname, activeScan.u_lastname]
+          .filter(Boolean).join(' ') || `u_id ${activeUId}`;
+        return res.status(409).json({
+          message: `งานนี้กำลังทำอยู่โดย ${ownerName} กรุณารอให้เสร็จก่อน`,
+          actor, tk_id,
+          locked_by: { u_id: activeUId, name: ownerName },
+          op_sc_id: activeScan.op_sc_id,
+        });
       }
 
       // ⑧ gen op_sc_id + INSERT
@@ -441,7 +470,7 @@ exports.finishOpScan = async (req, res) => {
       if (!String(g.out_part_no || "").trim())
         return res.status(400).json({ message: `groups[${num}]: out_part_no is required`, actor });
       if (!String(g.from_lot_no || "").trim())
-        return res.status(400).json({ message: `groups[${num}]: from_lot_no is required for tf=2`, actor });
+        return res.status(400).json({ message: `Group ${num}: กรุณาเลือก From Lot ก่อนบันทึก (Split-ID ต้องระบุ Lot ต้นทาง)`, actor });
       if (Array.isArray(g.splits) && g.splits.length > 0) {
         let sumSplit = 0;
         for (const s of g.splits) {
@@ -491,7 +520,7 @@ exports.finishOpScan = async (req, res) => {
   const totalGroupQty = groups.reduce((a, g) => a + Math.trunc(Number(g.qty)), 0);
   if (totalGroupQty !== Math.trunc(good_qty))
     return res.status(400).json({
-      message: `Sum ของทุก group (${totalGroupQty}) ต้องเท่ากับ good_qty (${Math.trunc(good_qty)}) พอดี`,
+      message: `⚠️ เช็คจำนวนรวมทุก Group ตอนนี้ได้ [${totalGroupQty}] ชิ้น\nแต่จำนวน OK มี [${Math.trunc(good_qty)}] ชิ้น — กรุณาตรวจสอบ`,
       actor,
     });
 
@@ -530,6 +559,23 @@ exports.finishOpScan = async (req, res) => {
       if (scanSta && scanSta !== actorSta) {
         await conn.rollback(); conn.release();
         return res.status(403).json({ message: `Scan started at ${scanSta} but you login as ${actorSta}`, actor, op_sc_id });
+      }
+
+      // ✅ เริ่มที่ใครต้องเสร็จที่คนนั้น
+      if (Number(row.u_id) !== Number(actor.u_id)) {
+        const [ownerRows] = await conn.query(
+          `SELECT u_firstname, u_lastname FROM \`user\` WHERE u_id = ? LIMIT 1`,
+          [row.u_id]
+        );
+        const ownerName = ownerRows[0]
+          ? [ownerRows[0].u_firstname, ownerRows[0].u_lastname].filter(Boolean).join(' ')
+          : `u_id ${row.u_id}`;
+        await conn.rollback(); conn.release();
+        return res.status(403).json({
+          message: `งานนี้เริ่มโดย ${ownerName} ต้องให้ ${ownerName} กด Finish เท่านั้น`,
+          actor, op_sc_id,
+          locked_by: { u_id: row.u_id, name: ownerName },
+        });
       }
 
       const master_tk_id = String(row.tk_id || "").trim();
@@ -870,34 +916,52 @@ if (Number(headRows[0]?.tk_status) === 1) {
         const [leafRows] = await conn.query(
           `SELECT DISTINCT t.to_lot_no
            FROM ${SAFE_TRANSFER} t
-           WHERE t.from_tk_id        = ?
+           WHERE (t.from_tk_id = ? OR t.to_tk_id = ?)
              AND t.lot_parked_status = 0
              AND t.op_sc_id         != ?
              AND t.to_lot_no NOT IN (
                SELECT DISTINCT from_lot_no
                FROM ${SAFE_TRANSFER}
-               WHERE from_tk_id   = ?
+               WHERE (from_tk_id = ? OR to_tk_id = ?)
                  AND from_lot_no IS NOT NULL
              )`,
-          [master_tk_id, op_sc_id, master_tk_id]
+          [master_tk_id, master_tk_id, op_sc_id, master_tk_id, master_tk_id]
         );
 
+        // ── own-TK: park unused active lots ────────────────
         for (const lr of leafRows || []) {
-  const lotNo = (lr.to_lot_no || "").trim();
-  if (!lotNo || usedFromLots.has(lotNo)) continue;
+          const lotNo = (lr.to_lot_no || "").trim();
+          if (!lotNo || usedFromLots.has(lotNo)) continue;
 
-  await conn.query(
-    `UPDATE ${SAFE_TRANSFER}
-     SET lot_parked_status = 1,
-         op_sc_id          = ?,
-         op_sta_id         = ?
-     WHERE from_tk_id        = ?
-       AND to_lot_no         = ?
-       AND lot_parked_status = 0`,
-    [op_sc_id, actorSta, master_tk_id, lotNo]
-  );
-  console.log(`[MARK_PARKED] lot=${lotNo} tk=${master_tk_id} sc=${op_sc_id} sta=${actorSta}`);
-}
+          await conn.query(
+            `UPDATE ${SAFE_TRANSFER}
+             SET lot_parked_status = 1,
+                 op_sta_id         = ?
+             WHERE (from_tk_id = ? OR to_tk_id = ?)
+               AND to_lot_no         = ?
+               AND lot_parked_status = 0`,
+            [actorSta, master_tk_id, master_tk_id, lotNo]
+          );
+          console.log(`[MARK_PARKED_OWN] lot=${lotNo} sta=${actorSta}`);
+        }
+
+        // ── cross-TK: lots พักจาก TK อื่นที่อยู่ใน station นี้แต่ไม่ถูกเลือก ─
+        //    → UPDATE op_sta_id ให้ตรงกับ station ปัจจุบัน (ยังพักอยู่เหมือนเดิม)
+        const crossTkLots = req.body.cross_tk_unselected_lots;
+        if (Array.isArray(crossTkLots) && crossTkLots.length > 0) {
+          for (const lotNo of crossTkLots) {
+            const lot = String(lotNo || "").trim();
+            if (!lot || usedFromLots.has(lot)) continue;
+            await conn.query(
+              `UPDATE ${SAFE_TRANSFER}
+               SET op_sta_id = ?
+               WHERE to_lot_no         = ?
+                 AND lot_parked_status  = 1`,
+              [actorSta, lot]
+            );
+            console.log(`[MARK_PARKED_CROSS] lot=${lot} sta=${actorSta}`);
+          }
+        }
       }
 
       // ⑦ update op_scan finish

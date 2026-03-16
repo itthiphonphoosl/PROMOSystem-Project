@@ -36,6 +36,8 @@ app.use("/api/transfers", transferRoutes);
 app.use("/api", tkDocRoutes);
 app.use("/api", require("./routes/op_scan.routes"));
 app.use("/api", colorRoutes);
+app.use('/api/print', require('./routes/print.routes'));
+
 
 function getLanIp() {
   const nets = os.networkInterfaces();

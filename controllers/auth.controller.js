@@ -33,9 +33,10 @@ function normalizeClientType(raw) {
 }
 
 async function login(req, res) {
-  const username   = String(req.body.username   || "").trim();
-  const password   = String(req.body.password   || "").trim();
-  const op_sta_id  = String(req.body.op_sta_id  || "").trim();
+  // รองรับทั้ง username (React/PC) และ u_username (Flutter/HH)
+  const username  = String(req.body.username  || req.body.u_username || "").trim();
+  const password  = String(req.body.password  || req.body.u_password || "").trim();
+  const op_sta_id = String(req.body.op_sta_id || "").trim();
 
   const clientTypeRaw = req.get("x-client-type") || req.headers["x-client-type"] || "UNKNOWN";
   const safeClientType = normalizeClientType(clientTypeRaw);

@@ -55,10 +55,11 @@ exports.listAllActiveOpScans = async (req, res) => {
     const pool = getPool();
 
     // MySQL ไม่มี OUTER APPLY → ใช้ subquery แทน
+    // operator เห็นเฉพาะงานของตัวเอง (u_id ตรงกัน)
     const whereExtra = isOperator
-      ? "AND TRIM(COALESCE(s.op_sta_id, m.op_sta_id)) = ?"
+      ? "AND TRIM(COALESCE(s.op_sta_id, m.op_sta_id)) = ? AND s.u_id = ?"
       : "";
-    const params = isOperator ? [opSta] : [];
+    const params = isOperator ? [opSta, Number(actor.u_id)] : [];
 
     const [rows] = await pool.query(
       `SELECT

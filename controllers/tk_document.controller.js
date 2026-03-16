@@ -543,7 +543,7 @@ exports.deleteTkDoc = async (req, res) => {
 
         return res.json({
           message:   "ลบ TK Document สำเร็จ (Hard Delete)",
-          action:    "hard_delete",
+          action:    "Delete",
           tk_id,
           part_no:   detail?.part_no   ?? null,
           part_name: detail?.part_name ?? null,
@@ -566,7 +566,7 @@ exports.deleteTkDoc = async (req, res) => {
 
         return res.json({
           message:   "ยกเลิก TK Document สำเร็จ (Soft Cancel)",
-          action:    "soft_cancel",
+          action:    "Cancel",
           tk_id,
           tk_status: 4,
           part_no:   detail?.part_no   ?? null,
