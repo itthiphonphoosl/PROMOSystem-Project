@@ -16,4 +16,7 @@ router.post('/barcode', requireAuth, printCtrl.printBarcode);
 // GET /api/print/history/:tk_id
 router.get('/history/:tk_id', requireAuth, printCtrl.getPrintHistory);
 
+// GET /api/print/test — ทดสอบเครื่องปริ้น (feed 1 ใบเปล่า)
+router.get('/test', requireAuth, printCtrl.testPrinter);
+
 module.exports = router;

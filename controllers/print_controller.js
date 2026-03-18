@@ -50,27 +50,37 @@ function buildLotLabel(lot, now) {
     new_part_no  = "",
     new_part_name= "",
     tf_rs_code   = 1,
+    color_name   = "",
   } = lot;
 
-  const tf       = Number(tf_rs_code);
-  const isMaster = tf === 1;
-  const isSplit  = tf === 2;
-  const isCo     = tf === 3;
-  const showNew  = !isMaster && (new_part_no || new_part_name);
+  const tf         = Number(tf_rs_code);
+  const isMaster   = tf === 1;
+  const isSplit    = tf === 2;
+  const isCo       = tf === 3;
+  const showNew    = !isMaster && (new_part_no || new_part_name);
+  const showColor  = !!color_name;
 
   // ── Lot No: "Lot No:" ใหญ่ (font "2"), ค่าเล็ก (font "1") ─
   // font "2" = ~10 dot/char → "Lot No: " (8 chars) = ~80 dots → value เริ่มที่ x=92
   // font "1" = ~8 dot/char, 500-92=408 dots → ~51 chars/line
-  const LOT_VAL_X  = 140;  // x ที่ value เริ่ม — font"2" 16dot/char × 8chars = 128 + 12 = 140
-  const LOT_LINE1  = 45;   // chars ในบรรทัด 1
-  const LOT_LINE2  = 62;   // chars ในบรรทัด 2 (เต็มแถว)
-  const lotVal1    = lot_no.slice(0, LOT_LINE1);
-  const lotVal2    = lot_no.length > LOT_LINE1
-    ? lot_no.slice(LOT_LINE1, LOT_LINE1 + LOT_LINE2)
+  const LOT_VAL_X  = 112;  // x ที่ value เริ่ม — ชิด "Lot No:" มากขึ้น
+  // actual font"1" ~10 dots/char → line1: (500-4-112)/10 = 38, ใช้ 36 (safe margin)
+  const LOT_LINE1  = 38;
+  const LOT_LINE2  = 50;   // line2 เริ่มจาก x=12: (500-4-12)/10 = 48 → 50 safe
+  // smart wrap: ตัดที่ space หรือ "-" ก่อนตำแหน่ง LOT_LINE1 ไม่ให้ขาดกลางคำ
+  let cutAt = LOT_LINE1;
+  if (lot_no.length > LOT_LINE1) {
+    const sub = lot_no.slice(0, LOT_LINE1);
+    const lastBreak = Math.max(sub.lastIndexOf(" "), sub.lastIndexOf("-"));
+    if (lastBreak > LOT_LINE1 * 0.7) cutAt = lastBreak + 1;
+  }
+  const lotVal1 = lot_no.slice(0, cutAt).trimEnd();
+  const lotVal2 = lot_no.length > cutAt
+    ? lot_no.slice(cutAt, cutAt + LOT_LINE2)
     : "";
 
   // ── QR Code ────────────────────────────────────────────────
-  const qrText  = tk_id || lot_no;
+  const qrText  = lot_no;  // encode lot_no เท่านั้น (scan แล้วหา tk_id ผ่าน TKRunLog)
   const qr      = QRCode.create(qrText, { errorCorrectionLevel: "H" });
   const m       = qr.modules;
   const modSize = m.size;
@@ -107,16 +117,29 @@ function buildLotLabel(lot, now) {
   const cbY = 234, cbSize = 20, cbTextY = cbY + 4;
   const mX = 16, sX = 168, cX = 316;
 
-  // ── Row Y: label bold font"1" + value font"1", ชิดขึ้น ────
-  // เริ่มที่ y=56 (ห่างจากเส้น y=50 แค่ 6 dots)
-  // row pitch: label 14 + value 14 + sep 4 = 32 dots
-  const R = showNew
-    ? { pnL:56,  pnV:70,  pnS:84,
-        nmL:88,  nmV:102, nmS:116,
-        npL:120, npV:134, npS:148,
-        nnL:152, nnV:166 }
-    : { pnL:64,  pnV:80,  pnS:100,
-        nmL:104, nmV:120 };
+  // ── Row Y: pitch 28 label→label ─────────────────────────────
+  // label y, value y+12, separator y+24 → next label y+28
+  // 5 rows: 50,78,106,134,162 → last value=174 (fits <228)
+  // 4 rows: 50,82,114,146     → last value=158 (fits <228)
+  // 3 rows: 50,86,122         → last value=134
+  // 2 rows: 50,92             → last value=104
+  const R = (showNew && showColor)
+    ? { pnL:50,  pnV:62,  pnS:74,
+        nmL:78,  nmV:90,  nmS:102,
+        npL:106, npV:118, npS:130,
+        nnL:134, nnV:146, nnS:158,
+        clL:162, clV:174 }
+    : showNew
+    ? { pnL:50,  pnV:62,  pnS:76,
+        nmL:82,  nmV:94,  nmS:108,
+        npL:114, npV:126, npS:140,
+        nnL:146, nnV:158 }
+    : showColor
+    ? { pnL:50,  pnV:62,  pnS:76,
+        nmL:82,  nmV:94,  nmS:108,
+        clL:114, clV:126 }
+    : { pnL:50,  pnV:64,  pnS:82,
+        nmL:90,  nmV:104 };
 
   // ── TSPL ───────────────────────────────────────────────────
   const lines = [
@@ -141,14 +164,21 @@ function buildLotLabel(lot, now) {
     `BAR ${divX},46,2,182`,
   ];
 
-  // ── QR BAR commands ────────────────────────────────────────
+  // ── QR BAR commands (bounds-checked: max 496x296) ──────────
+  const QR_MAX_X = 496, QR_MAX_Y = 226;
   for (let row = 0; row < modSize; row++) {
+    const y = dataY + row * cell;
+    if (y + cell > QR_MAX_Y) break;          // หยุดถ้าเกิน area
     let run = -1;
     for (let col = 0; col <= modSize; col++) {
       const dark = col < modSize && m.get(row, col);
       if (dark && run === -1) { run = col; }
       else if (!dark && run !== -1) {
-        lines.push(`BAR ${dataX + run * cell},${dataY + row * cell},${(col - run) * cell},${cell}`);
+        const x = dataX + run * cell;
+        const w = (col - run) * cell;
+        if (x + w <= QR_MAX_X) {             // skip ถ้าเกิน width
+          lines.push(`BAR ${x},${y},${w},${cell}`);
+        }
         run = -1;
       }
     }
@@ -174,6 +204,12 @@ function buildLotLabel(lot, now) {
     lines.push(`BAR ${divX},${R.npS},${rW},1`);
     boldLabel(infoX, R.nnL, "New Part Name:");
     lines.push(`TEXT ${infoX},${R.nnV},"1",0,1,1,"${new_part_name}"`);
+  }
+
+  if (showColor) {
+    lines.push(`BAR ${divX},${showNew ? R.nnS ?? (R.nnV + 14) : R.nmS},${rW},1`);
+    boldLabel(infoX, R.clL, "Color Name:");
+    lines.push(`TEXT ${infoX},${R.clV},"1",0,1,1,"${color_name}"`);
   }
 
   // ── Checkboxes ─────────────────────────────────────────────
@@ -296,14 +332,16 @@ Write-Output "OK:\$written"
 //   4) เช็ค print_log → ข้าม lot ที่ปริ้นแล้ว
 // ════════════════════════════════════════════════════════════════
 async function printBarcode(req, res) {
-  const { tk_id } = req.body;
+  const { tk_id, op_sc_id } = req.body;
 
   if (!tk_id)        return res.status(400).json({ ok: false, message: "tk_id is required" });
   if (!PRINTER_NAME) return res.status(500).json({ ok: false, message: "PRINTER_NAME not set in .env" });
 
   const pool      = getPool();
-  const printedBy = req.user?.u_username || "system";
+  const printedBy = req.user?.u_id || null;
   const now       = new Date();
+  // op_sc_id (optional) — ถ้าส่งมาจะปริ้นเฉพาะ lot ของ scan นั้น + active เท่านั้น
+  const filterByScan = !!op_sc_id;
 
   // ── 1) ตรวจ TKHead ───────────────────────────────────────
   let headRow;
@@ -320,32 +358,36 @@ async function printBarcode(req, res) {
   if (!Number(headRow.tk_active)) return res.status(403).json({ ok: false, message: "เอกสารนี้ถูกปิดใช้งาน" });
 
   // ── 2) ดึง lots จาก t_transfer ───────────────────────────
-  //    GROUP BY to_lot_no เอา transfer_id ล่าสุด (tf_rs_code อาจถูก update)
+  //   ถ้ามี op_sc_id → เฉพาะ lot ของ scan นั้น + active (parked_status=0)
+  //   ถ้าไม่มี       → ทุก lot ของ TK (พฤติกรรมเดิม)
   let transferLots = [];
   try {
-    // ใช้ subquery หา transfer_id ล่าสุดของแต่ละ to_lot_no ก่อน แล้วค่อย JOIN
     const [rows] = await pool.query(
       `SELECT
-         t.to_lot_no          AS lot_no,
+         t.to_lot_no           AS lot_no,
          t.tf_rs_code,
-         fp.part_no           AS part_no,
-         fp.part_name         AS part_name,
-         tp.part_no           AS new_part_no,
-         tp.part_name         AS new_part_name
+         t.lot_parked_status,
+         fp.part_no            AS part_no,
+         fp.part_name          AS part_name,
+         tp.part_no            AS new_part_no,
+         tp.part_name          AS new_part_name,
+         cp.color_name         AS color_name
        FROM \`t_transfer\` t
-       -- เอาเฉพาะ transfer_id ล่าสุดของแต่ละ to_lot_no
        INNER JOIN (
          SELECT to_lot_no, MAX(transfer_id) AS max_id
          FROM \`t_transfer\`
          WHERE to_tk_id = ?
+         ${filterByScan ? "AND op_sc_id = ?" : ""}
          GROUP BY to_lot_no
        ) latest ON latest.to_lot_no = t.to_lot_no AND latest.max_id = t.transfer_id
-       LEFT JOIN \`TKRunLog\` frl ON frl.lot_no = t.from_lot_no
-       LEFT JOIN \`part\`     fp  ON fp.part_id = frl.part_id
-       LEFT JOIN \`TKRunLog\` trl ON trl.lot_no = t.to_lot_no
-       LEFT JOIN \`part\`     tp  ON tp.part_id = trl.part_id
+       LEFT JOIN \`TKRunLog\`       frl ON frl.lot_no  = t.from_lot_no
+       LEFT JOIN \`part\`           fp  ON fp.part_id  = frl.part_id
+       LEFT JOIN \`TKRunLog\`       trl ON trl.lot_no  = t.to_lot_no
+       LEFT JOIN \`part\`           tp  ON tp.part_id  = trl.part_id
+       LEFT JOIN \`color_painting\`  cp  ON cp.color_id = t.color_id
+       ${filterByScan ? "WHERE t.lot_parked_status = 0" : ""}
        ORDER BY t.transfer_id ASC`,
-      [tk_id, tk_id]
+      filterByScan ? [tk_id, op_sc_id] : [tk_id, tk_id]
     );
     transferLots = rows;
   } catch (e) {
@@ -381,7 +423,12 @@ async function printBarcode(req, res) {
   }
 
   if (allLots.length === 0) {
-    return res.status(404).json({ ok: false, message: `ไม่พบข้อมูล Lot สำหรับ tk_id=${tk_id}` });
+    return res.status(404).json({
+      ok: false,
+      message: filterByScan
+        ? `ไม่พบ Lot active สำหรับ op_sc_id=${op_sc_id} (อาจเป็น lot พักทั้งหมด)`
+        : `ไม่พบข้อมูล Lot สำหรับ tk_id=${tk_id}`,
+    });
   }
 
   // ── 4) กรอง lot ที่ยังไม่เคยปริ้น ───────────────────────
@@ -392,7 +439,7 @@ async function printBarcode(req, res) {
     let printed = false;
     try {
       const [rows] = await pool.query(
-        `SELECT pl_id FROM print_log WHERE lot_no = ? AND status = 'success' LIMIT 1`,
+        `SELECT pl_id FROM print_log WHERE lot_no = ? AND status = 1 LIMIT 1`,
         [lot.lot_no]
       );
       printed = rows.length > 0;
@@ -436,7 +483,7 @@ async function printBarcode(req, res) {
       try {
         await pool.query(
           `INSERT INTO print_log (tk_id, lot_no, printed_by, copies, printer_ip, status, created_at)
-           VALUES (?, ?, ?, 1, ?, 'success', NOW())`,
+           VALUES (?, ?, ?, 1, ?, 1, NOW())`,
           [tk_id, lot.lot_no, printedBy, PRINTER_IP]
         );
         console.log(`[print_log] ✓ ${lot.lot_no}`);
@@ -472,7 +519,7 @@ async function printBarcode(req, res) {
       try {
         await pool.query(
           `INSERT INTO print_log (tk_id, lot_no, printed_by, copies, printer_ip, status, created_at)
-           VALUES (?, ?, ?, 1, ?, 'error', NOW())`,
+           VALUES (?, ?, ?, 1, ?, 0, NOW())`,
           [tk_id, lot.lot_no, printedBy, PRINTER_IP]
         );
       } catch (_) {}
@@ -496,4 +543,41 @@ async function getPrintHistory(req, res) {
   }
 }
 
-module.exports = { printBarcode, getPrintHistory };
+// ════════════════════════════════════════════════════════════════
+// GET /api/print/test
+// ทดสอบเชื่อมต่อเครื่องปริ้น — feed กระดาษ 1 ใบเปล่า ไม่พิมพ์อะไร
+// ════════════════════════════════════════════════════════════════
+async function testPrinter(req, res) {
+  if (!PRINTER_NAME) {
+    return res.status(500).json({ ok: false, message: "PRINTER_NAME ยังไม่ได้ตั้งค่าใน .env" });
+  }
+
+  const tspl = [
+    "SIZE 63 mm, 38 mm",
+    "GAP 3 mm, 0",
+    "DIRECTION 1",
+    "SET TEAR ON",
+    "CLS",
+    "PRINT 1,1",
+    "",
+  ].join("\r\n");
+
+  try {
+    const result = await sendToPrinter(tspl, PRINTER_NAME);
+    return res.json({
+      ok:      true,
+      message: "เครื่องปริ้นตอบสนองปกติ",
+      printer: PRINTER_NAME,
+      result,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      ok:      false,
+      message: "เชื่อมต่อเครื่องปริ้นไม่ได้",
+      printer: PRINTER_NAME,
+      error:   err.message,
+    });
+  }
+}
+
+module.exports = { printBarcode, getPrintHistory, testPrinter };

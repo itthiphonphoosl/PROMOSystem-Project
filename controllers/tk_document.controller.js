@@ -585,3 +585,29 @@ exports.deleteTkDoc = async (req, res) => {
     return res.status(500).json({ message: "Delete failed", actor, error: err.message });
   }
 };
+
+// ─────────────────────────────────────────────────────────
+// GET /api/TKDocs/by-lot/:lot_no
+// รับ lot_no → return tk_id
+// ─────────────────────────────────────────────────────────
+exports.getTkIdByLotNo = async (req, res) => {
+  const actor  = actorOf(req);
+  const lot_no = String(req.params.lot_no || req.query.lot_no || "").trim();
+  if (!lot_no) return res.status(400).json({ message: "lot_no is required", actor });
+
+  try {
+    const pool = getPool();
+    const [rows] = await pool.query(
+      `SELECT tk_id FROM \`tkrunlog\` WHERE lot_no = ? LIMIT 1`,
+      [lot_no]
+    );
+    if (!rows[0]) {
+      return res.status(404).json({ message: "ไม่พบ Lot No. นี้ในระบบ", actor, lot_no });
+    }
+    const tk_id = String(rows[0].tk_id).trim();
+    return res.json({ ok: true, tk_id, lot_no, actor });
+  } catch (err) {
+    console.error("[GET_TK_BY_LOT][ERROR]", err);
+    return res.status(500).json({ message: "Server error", actor, error: err.message });
+  }
+};

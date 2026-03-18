@@ -26,6 +26,14 @@ router.get(
   opScanQueryController.getParkedLots
 );
 
+// ✅ lookup-by-lot — ใช้ใน Start Scan (HH) สแกน lot_no แล้วหา tk_id
+//    ต้องอยู่ก่อน /op-scan/:op_sc_id เสมอ
+router.get(
+  "/op-scans/lookup-by-lot/:lot_no",
+  requireAuth, requireRole(["operator"]), requireClientType(["HH"]),
+  opScanQueryController.lookupTkByLotNo
+);
+
 router.get(
   "/op-scan/summary/:tk_id",
   requireAuth, requireRole(["admin", "operator"]), requireClientType(["PC", "HH"]),

@@ -105,7 +105,8 @@ exports.getOpScanById = async (req, res) => {
   if (!op_sc_id) return res.status(400).json({ message: "op_sc_id is required", actor });
 
   try {
-    const pool  = getPool();
+    const pool = getPool();
+
     const [rows] = await pool.query(
       `SELECT
          s.op_sc_id,
@@ -135,13 +136,68 @@ exports.getOpScanById = async (req, res) => {
     const row = rows[0];
     if (!row) return res.status(404).json({ message: "Not found", actor, op_sc_id });
 
-    return res.json({ actor, item: row });
+    // 1) lot ที่เกิดจาก op_scan นี้
+    const [incomingRows] = await pool.query(
+      `SELECT
+         t.to_lot_no AS lot_no,
+         t.from_lot_no,
+         t.tf_rs_code,
+         t.transfer_qty AS qty,
+         t.lot_parked_status,
+         t.color_id,
+         cp.color_no,
+         cp.color_name,
+         t.transfer_ts
+       FROM ${SAFE_TRANSFER} t
+       LEFT JOIN \`color_painting\` cp ON cp.color_id = t.color_id
+       WHERE t.op_sc_id = ?
+       ORDER BY t.transfer_id ASC`,
+      [op_sc_id]
+    );
+
+    // 2) lot ล่าสุดทั้งหมดของ tk นี้ ที่ยัง active อยู่
+    const [currentRows] = await pool.query(
+      `SELECT
+         t.to_lot_no AS lot_no,
+         t.from_lot_no,
+         t.tf_rs_code,
+         t.transfer_qty AS qty,
+         t.lot_parked_status,
+         t.color_id,
+         cp.color_no,
+         cp.color_name,
+         t.op_sta_id,
+         t.op_sc_id,
+         t.transfer_ts
+       FROM ${SAFE_TRANSFER} t
+       INNER JOIN (
+         SELECT to_lot_no, MAX(transfer_id) AS max_transfer_id
+         FROM ${SAFE_TRANSFER}
+         WHERE to_tk_id = ?
+         GROUP BY to_lot_no
+       ) latest
+         ON latest.to_lot_no = t.to_lot_no
+        AND latest.max_transfer_id = t.transfer_id
+       LEFT JOIN \`color_painting\` cp ON cp.color_id = t.color_id
+       WHERE t.to_tk_id = ?
+         AND t.lot_parked_status = 0
+       ORDER BY t.transfer_id ASC`,
+      [row.tk_id, row.tk_id]
+    );
+
+    return res.json({
+      actor,
+      item: row,
+      incoming_lots: incomingRows,
+      incoming_lot_count: incomingRows.length,
+      current_lots: currentRows,
+      current_lot_count: currentRows.length,
+    });
   } catch (err) {
     console.error("[OPSCAN_GET][ERROR]", err);
     return res.status(500).json({ message: "Get failed", actor, error: err.message });
   }
 };
-
 // ─────────────────────────────────────────────────────────
 // GET /api/op-scan/active/:tk_id
 // ─────────────────────────────────────────────────────────
@@ -395,15 +451,62 @@ if (Number(head.tk_active) !== 1 && actor.u_type === "op") {
       0: "NOT_STARTED", 1: "FINISHED", 2: "PARTIAL_DONE", 3: "IN_PROGRESS", 4: "CANCELLED",
     }[head.tk_status] ?? "UNKNOWN";
 
-   return res.json({
-  actor,
-  tk_id:            head.tk_id,
-  tk_status:        head.tk_status,
-  tk_status_label,
-  is_finished:      head.tk_status === 1,
-  tk_active:        Number(head.tk_active),
-  is_active:        Number(head.tk_active) === 1,
-  tk_created_at_ts: head.tk_created_at_ts ? new Date(head.tk_created_at_ts).toISOString() : null,
+    // ── group by station → scan → transfers/parked_lots ──────────
+    const stationOrder = [...new Set(scans.map(s => s.op_sta_id).filter(Boolean))];
+
+    const stations_history = stationOrder.map(sta_id => {
+      const staScans = scans.filter(s => s.op_sta_id === sta_id);
+      const staGood  = staScans.reduce((a, s) => a + (s.op_sc_good_qty  || 0), 0);
+      const staScrap = staScans.reduce((a, s) => a + (s.op_sc_scrap_qty || 0), 0);
+
+      const scansGrouped = staScans.map((s, idx) => {
+        const scanTransfers = transfers.filter(t => t.op_sc_id === s.op_sc_id);
+        const scanParked    = parked.filter(p =>
+          scanTransfers.some(t => t.transfer_id === p.transfer_id)
+        );
+        return {
+          scan_no:          idx + 1,
+          op_sc_id:         s.op_sc_id,
+          tf_rs_name:       s.tf_rs_code === 1 ? "Master-ID"
+                          : s.tf_rs_code === 2 ? "Split-ID"
+                          : s.tf_rs_code === 3 ? "Co-ID"
+                          : null,
+          u_firstname:      s.u_firstname,
+          u_lastname:       s.u_lastname,
+          MC_id:            s.MC_id,
+          MC_name:          s.MC_name,
+          op_sc_good_qty:   s.op_sc_good_qty,
+          op_sc_scrap_qty:  s.op_sc_scrap_qty,
+          op_sc_total_qty:  s.op_sc_total_qty,
+          // lot_no: ใช้จาก op_scan ก่อน ถ้า null ให้ fallback เอา to_lot_no แรกจาก transfers
+          lot_no:           s.lot_no
+                            ?? (scanTransfers.find(t => t.lot_parked_status === 0)?.to_lot_no ?? null),
+          op_sc_ts:         s.op_sc_ts,
+          op_sc_finish_ts:  s.op_sc_finish_ts,
+          scan_status:      s.scan_status,
+          transfers:        scanTransfers,
+          parked_lots:      scanParked,
+        };
+      });
+
+      return {
+        op_sta_id:   sta_id,
+        op_sta_name: staScans[0]?.op_sta_name ?? null,
+        total_good:  staGood,
+        total_scrap: staScrap,
+        scans:       scansGrouped,
+      };
+    });
+
+    return res.json({
+      actor,
+      tk_id:            head.tk_id,
+      tk_status:        head.tk_status,
+      tk_status_label,
+      is_finished:      head.tk_status === 1,
+      tk_active:        Number(head.tk_active),
+      is_active:        Number(head.tk_active) === 1,
+      tk_created_at_ts: head.tk_created_at_ts ? new Date(head.tk_created_at_ts).toISOString() : null,
 
       base:    { run_no: base_run_no, lot_no: base_lot_no },
       current: detail ? {
@@ -415,7 +518,6 @@ if (Number(head.tk_active) !== 1 && actor.u_type === "op") {
       current_station,
       last_finished_op_sc_id,
       incoming_lots,
-      parked_lots_station_all,
 
       summary: {
         total_scans:       scans.length,
@@ -425,9 +527,14 @@ if (Number(head.tk_active) !== 1 && actor.u_type === "op") {
         parked_lots_count: parked.length,
       },
 
-      scans,
-      transfers,
+      // ── ประวัติแยกตาม station (เรียงตามลำดับที่ทำ) ──
+      stations_history,
+
+      // lot พักของ TK นี้เท่านั้น — จะหายไปเมื่อถูกนำไป Co-ID กับ TK อื่น
       parked_lots: parked,
+
+      // lot พักทั้งหมดที่ station นี้ (ทุก TK) — ใช้สำหรับเลือก Co-ID
+      parked_lots_station_all,
     });
   } catch (err) {
     console.error("[TK_SUMMARY][ERROR]", err);
@@ -474,5 +581,176 @@ exports.getParkedLots = async (req, res) => {
   } catch (err) {
     console.error("[PARKED_LOTS][ERROR]", err);
     return res.status(500).json({ message: "Get parked lots failed", actor, error: err.message });
+  }
+};
+async function getCurrentActiveLotsByTk(pool, tk_id) {
+  // หา latest row ของแต่ละ to_lot_no ใน tk นี้
+  const [rows] = await pool.query(
+    `SELECT
+       x.to_lot_no AS lot_no,
+       x.from_lot_no,
+       x.tf_rs_code,
+       x.transfer_qty AS qty,
+       x.lot_parked_status,
+       x.op_sta_id,
+       x.op_sc_id,
+       x.transfer_ts
+     FROM ${SAFE_TRANSFER} x
+     INNER JOIN (
+       SELECT to_lot_no, MAX(transfer_id) AS max_transfer_id
+       FROM ${SAFE_TRANSFER}
+       WHERE to_tk_id = ?
+       GROUP BY to_lot_no
+     ) latest
+       ON latest.to_lot_no = x.to_lot_no
+      AND latest.max_transfer_id = x.transfer_id
+     WHERE x.to_tk_id = ?
+       AND x.lot_parked_status = 0
+     ORDER BY x.transfer_id ASC`,
+    [tk_id, tk_id]
+  );
+
+  // ถ้ายังไม่มี transfer เลย แปลว่าเป็น base lot ตอนเพิ่งสร้างเอกสาร
+  if (!rows.length) {
+    const [baseRows] = await pool.query(
+      `SELECT r.lot_no, r.run_no, p.part_no, p.part_name
+       FROM \`TKRunLog\` r
+       LEFT JOIN \`part\` p ON p.part_id = r.part_id
+       WHERE r.tk_id = ?
+       ORDER BY r.created_at_ts ASC
+       LIMIT 1`,
+      [tk_id]
+    );
+
+    if (!baseRows[0]) return [];
+
+    return [{
+      lot_no: baseRows[0].lot_no,
+      from_lot_no: null,
+      tf_rs_code: 0,
+      qty: null,
+      lot_parked_status: 0,
+      op_sta_id: null,
+      op_sc_id: null,
+      transfer_ts: null,
+      part_no: baseRows[0].part_no ?? null,
+      part_name: baseRows[0].part_name ?? null,
+      run_no: baseRows[0].run_no ?? null,
+    }];
+  }
+
+  return rows;
+}
+// ─────────────────────────────────────────────────────────
+// GET /api/op-scans/lookup-by-lot/:lot_no
+//
+// รับ lot_no → ค้นหา tk_id จาก TKRunLog → return TK info
+// ใช้สำหรับ Start Scan ที่สแกน lot_no แทน tk_id
+// ─────────────────────────────────────────────────────────
+exports.lookupTkByLotNo = async (req, res) => {
+  const actor  = actorOf(req);
+  const lot_no = String(req.params.lot_no || req.query.lot_no || "").trim();
+
+  if (!lot_no) {
+    return res.status(400).json({ message: "กรุณาระบุ lot_no", actor });
+  }
+
+  try {
+    const pool = getPool();
+
+    const [logRows] = await pool.query(
+      `SELECT tk_id FROM \`TKRunLog\` WHERE lot_no = ? LIMIT 1`,
+      [lot_no]
+    );
+
+    if (!logRows[0]) {
+      return res.status(404).json({ message: "ไม่พบ Lot No. นี้ในระบบ", actor, lot_no });
+    }
+
+    const tk_id = String(logRows[0].tk_id).trim();
+
+    const [[tkHead]] = await pool.query(
+      `SELECT tk_id, tk_status, tk_active FROM \`TKHead\` WHERE tk_id = ? LIMIT 1`,
+      [tk_id]
+    );
+
+    if (!tkHead) {
+      return res.status(404).json({ message: "ไม่พบ Tracking No. ของ Lot นี้ในระบบ", actor, lot_no, tk_id });
+    }
+    if (Number(tkHead.tk_active) !== 1) {
+      return res.status(403).json({ message: "เอกสารนี้ถูกปิดใช้งานอยู่ กรุณาติดต่อ Admin", actor, lot_no, tk_id, tk_active: Number(tkHead.tk_active) });
+    }
+    if (Number(tkHead.tk_status) === 4) {
+      return res.status(403).json({ message: "เอกสาร Tracking No. นี้ถูก Cancel ไปแล้ว", actor, lot_no, tk_id });
+    }
+    if (Number(tkHead.tk_status) === 1) {
+      return res.status(403).json({ message: "Tracking No. นี้ดำเนินการเสร็จสิ้นแล้ว ไม่สามารถเริ่มงานได้", actor, lot_no, tk_id });
+    }
+
+    const [parkedRows] = await pool.query(
+      `SELECT lot_parked_status, op_sta_id
+       FROM \`t_transfer\`
+       WHERE to_lot_no = ?
+       ORDER BY transfer_ts DESC
+       LIMIT 1`,
+      [lot_no]
+    );
+
+    const parkedRow = parkedRows[0];
+    if (parkedRow && (parkedRow.lot_parked_status === 1 || parkedRow.lot_parked_status === true)) {
+      const parkedSta = parkedRow.op_sta_id ?? "-";
+      return res.status(403).json({
+        message: `Lot "${lot_no}" ถูกพักไว้ที่ ${parkedSta} ยังไม่สามารถเริ่มงานได้`,
+        actor,
+        lot_no,
+        tk_id,
+        parked_at_sta: parkedSta,
+      });
+    }
+
+    const [detailRows] = await pool.query(
+      `SELECT d.part_id, p.part_no, p.part_name, d.lot_no, d.tk_status
+       FROM ${SAFE_TKDETAIL} d
+       LEFT JOIN \`part\` p ON p.part_id = d.part_id
+       WHERE d.tk_id = ?
+       ORDER BY d.tk_created_at_ts DESC
+       LIMIT 1`,
+      [tk_id]
+    );
+    const detail = detailRows[0] ?? null;
+
+    const [lastFinRows] = await pool.query(
+      `SELECT s.op_sta_id, st.op_sta_name, s.op_sc_finish_ts
+       FROM \`op_scan\` s
+       LEFT JOIN \`op_station\` st ON st.op_sta_id = s.op_sta_id
+       WHERE s.tk_id = ? AND s.op_sc_finish_ts IS NOT NULL
+       ORDER BY s.op_sc_finish_ts DESC
+       LIMIT 1`,
+      [tk_id]
+    );
+    const lastFinished = lastFinRows[0] ?? null;
+
+    const current_lots = await getCurrentActiveLotsByTk(pool, tk_id);
+
+    return res.json({
+      actor,
+      lot_no,
+      tk_id,
+      tk_status: tkHead.tk_status,
+      detail: detail ? {
+        part_no:   detail.part_no   ?? null,
+        part_name: detail.part_name ?? null,
+        lot_no:    detail.lot_no    ?? null,
+        tk_status: detail.tk_status,
+      } : null,
+      current_lots,
+      current_lot_count: current_lots.length,
+      scanned_lot_no: lot_no,
+      last_finished_sta:      lastFinished?.op_sta_id   ?? null,
+      last_finished_sta_name: lastFinished?.op_sta_name ?? null,
+    });
+  } catch (err) {
+    console.error("[LOOKUP_BY_LOT][ERROR]", err);
+    return res.status(500).json({ message: "Lookup failed", actor, error: err.message });
   }
 };

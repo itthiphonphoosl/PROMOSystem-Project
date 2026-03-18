@@ -239,12 +239,51 @@ if (headStatus === 1) {
         [tk_id, tk_id]
       );
       const tRows   = tRows2 || [];
-      const fromSet = new Set(tRows.map(r => (r.from_lot_no || "").trim()).filter(Boolean));
+      // fromSet: lots ที่ถูก "ใช้ไป" (เป็น from ในการสร้าง lot ใหม่ที่ต่างออกไป)
+      const fromSet = new Set(
+        tRows
+          .filter(r => (r.from_lot_no || "").trim() !== (r.to_lot_no || "").trim())
+          .map(r => (r.from_lot_no || "").trim())
+          .filter(Boolean)
+      );
+      // selfRefLots: lots ที่ from=to (Master-ID) → ยังมีชีวิตอยู่ ถือเป็น leaf เสมอ
+      const selfRefLots = new Set(
+        tRows
+          .filter(r => (r.lot_parked_status === 0 || r.lot_parked_status === false)
+                    && (r.from_lot_no || "").trim() === (r.to_lot_no || "").trim()
+                    && (r.to_lot_no || "").trim())
+          .map(r => (r.to_lot_no || "").trim())
+      );
       const leafLots = tRows
         .filter(r => r.lot_parked_status === 0 || r.lot_parked_status === false)
         .map(r => (r.to_lot_no || "").trim())
-        .filter(lot => lot && !fromSet.has(lot));
+        .filter(lot => lot && (!fromSet.has(lot) || selfRefLots.has(lot)));
       const leafLotSet = [...new Set(leafLots)];
+
+      // ③.c ตรวจว่า lot ปัจจุบันของ tk นี้เป็น Parked Lot หรือไม่
+      //     lot พัก = lot_parked_status=1 → ห้ามเริ่มงาน จนกว่าจะถูก Co-ID นำไปใช้
+      if (leafLotSet.length > 0) {
+        const [parkedCheckRows] = await conn.query(
+          `SELECT to_lot_no, op_sta_id
+           FROM ${SAFE_TRANSFER}
+           WHERE to_tk_id = ?
+             AND to_lot_no IN (${leafLotSet.map(() => '?').join(',')})
+             AND lot_parked_status = 1
+           LIMIT 1`,
+          [tk_id, ...leafLotSet]
+        );
+        if (parkedCheckRows[0]) {
+          const parkedLotNo = parkedCheckRows[0].to_lot_no;
+          const parkedSta   = parkedCheckRows[0].op_sta_id ?? '-';
+          await conn.rollback(); conn.release();
+          return res.status(403).json({
+            message: `Lot "${parkedLotNo}" ถูกพักไว้ที่ ${parkedSta} ไม่สามารถเริ่มงานได้ จนกว่าจะถูกนำไปใช้ใน Co-ID`,
+            actor, tk_id,
+            parked_lot_no: parkedLotNo,
+            parked_at_sta: parkedSta,
+          });
+        }
+      }
 
       // ④ กัน STA007 finished
       const [finishedRows] = await conn.query(
@@ -317,10 +356,11 @@ if (headStatus === 1) {
 
       // ⑦ กัน active scan ซ้ำ — เริ่มที่ใครต้องเสร็จที่คนนั้น
       const [activeRows] = await conn.query(
-        `SELECT s.op_sc_id, s.op_sta_id, s.u_id,
+        `SELECT s.op_sc_id, s.op_sta_id, st.op_sta_name, s.u_id,
                 u.u_firstname, u.u_lastname
          FROM ${SAFE_OPSCAN} s
-         LEFT JOIN \`user\` u ON u.u_id = s.u_id
+         LEFT JOIN \`user\`       u  ON u.u_id       = s.u_id
+         LEFT JOIN \`op_station\` st ON st.op_sta_id = s.op_sta_id
          WHERE s.tk_id = ? AND s.op_sc_finish_ts IS NULL
          ORDER BY s.op_sc_ts DESC
          LIMIT 1
@@ -346,14 +386,21 @@ if (headStatus === 1) {
           });
         }
 
-        // คนอื่น → block พร้อมบอกชื่อ
+        // คนอื่น → block พร้อมบอกชื่อ + station ที่กำลังทำอยู่
         await conn.rollback(); conn.release();
-        const ownerName = [activeScan.u_firstname, activeScan.u_lastname]
+        const ownerName    = [activeScan.u_firstname, activeScan.u_lastname]
           .filter(Boolean).join(' ') || `u_id ${activeUId}`;
+        const activeSta    = activeScan.op_sta_id   ? String(activeScan.op_sta_id).trim()   : null;
+        const activeStaName = activeScan.op_sta_name ? String(activeScan.op_sta_name).trim() : null;
         return res.status(409).json({
-          message: `งานนี้กำลังทำอยู่โดย ${ownerName} กรุณารอให้เสร็จก่อน`,
+          message: `งานนี้กำลังทำอยู่โดย ${ownerName} ที่ ${activeSta ?? "-"} กรุณารอให้เสร็จก่อน`,
           actor, tk_id,
-          locked_by: { u_id: activeUId, name: ownerName },
+          locked_by: {
+            u_id:       activeUId,
+            name:       ownerName,
+            op_sta_id:   activeSta,
+            op_sta_name: activeStaName,
+          },
           op_sc_id: activeScan.op_sc_id,
         });
       }
@@ -392,12 +439,13 @@ if (headStatus === 1) {
         op_sc_total_qty: 0,
         base_lot_no, base_run_no,
         tk_doc: {
-          tk_id:     tkDoc.tk_id,
-          part_id:   tkDoc.part_id,
-          part_no:   tkDoc.part_no,
-          part_name: tkDoc.part_name,
-          op_sta_id, op_sta_name: actor.op_sta_name ?? null,
-          tk_status: 3,
+          tk_id:      tkDoc.tk_id,
+          part_id:    tkDoc.part_id,
+          part_no:    tkDoc.part_no,
+          part_name:  tkDoc.part_name,
+          op_sta_id,  op_sta_name: actor.op_sta_name ?? null,
+          MC_id,      MC_name: mcRow?.MC_name ?? null,
+          tk_status:  3,
         },
         current_lots: leafLotSet.length > 0
           ? leafLotSet.map(lot => {
