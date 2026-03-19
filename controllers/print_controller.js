@@ -99,9 +99,13 @@ function buildLotLabel(lot, now) {
   const dataY   = qrTop  + quiet * cell;
 
   // ── Layout ─────────────────────────────────────────────────
-  const divX  = qrLeft + qrTotal + 2;
+  const R_EDGE = 472;             // right content boundary (leave ~4mm margin from paper edge)
+  const divX  = Math.min(qrLeft + qrTotal + 2, 165);  // cap left panel ≤165 so right panel ≥325
   const infoX = divX + 6;
-  const rW    = 500 - divX;
+  const rW    = R_EDGE - divX;   // separator bar width (never touches right BOX edge)
+  // font "1" = 8 dots/char → max chars before right edge
+  const MAX_VAL = Math.floor((R_EDGE - infoX) / 8);
+  const trunc   = (s) => String(s || '').slice(0, MAX_VAL);
 
   // ── Date/Time ──────────────────────────────────────────────
   const dd   = String(now.getDate()).padStart(2, "0");
@@ -114,7 +118,7 @@ function buildLotLabel(lot, now) {
   const timeStr = `${hh}:${mi}:${ss}`;
 
   // ── Checkbox ───────────────────────────────────────────────
-  const cbY = 234, cbSize = 20, cbTextY = cbY + 4;
+  const cbY = 218, cbSize = 18, cbTextY = cbY + 3;
   const mX = 16, sX = 168, cX = 316;
 
   // ── Row Y: pitch 28 label→label ─────────────────────────────
@@ -152,20 +156,20 @@ function buildLotLabel(lot, now) {
     `SPEED 3`,
     `DENSITY 6`,
     `CLS`,
-    `BOX 4,4,500,300,2`,
+    `BOX 4,4,476,272,2`,
 
     // "Lot No:" ใหญ่ (font "2") + value เล็ก (font "1") inline
     `TEXT 12,6,"2",0,1,1,"Lot No:"`,
     `TEXT ${LOT_VAL_X},10,"1",0,1,1,"${lotVal1}"`,
     ...(lotVal2 ? [`TEXT 12,26,"1",0,1,1,"${lotVal2}"`] : []),
-    `BAR 4,44,496,2`,
+    `BAR 4,44,472,2`,
 
     // Vertical divider
     `BAR ${divX},46,2,182`,
   ];
 
   // ── QR BAR commands (bounds-checked: max 496x296) ──────────
-  const QR_MAX_X = 496, QR_MAX_Y = 226;
+  const QR_MAX_X = 472, QR_MAX_Y = 226;
   for (let row = 0; row < modSize; row++) {
     const y = dataY + row * cell;
     if (y + cell > QR_MAX_Y) break;          // หยุดถ้าเกิน area
@@ -191,29 +195,29 @@ function buildLotLabel(lot, now) {
   };
 
   boldLabel(infoX, R.pnL, "Part No:");
-  lines.push(`TEXT ${infoX},${R.pnV},"1",0,1,1,"${part_no}"`);
+  lines.push(`TEXT ${infoX},${R.pnV},"1",0,1,1,"${trunc(part_no)}"`);
   lines.push(`BAR ${divX},${R.pnS},${rW},1`);
 
   boldLabel(infoX, R.nmL, "Part Name:");
-  lines.push(`TEXT ${infoX},${R.nmV},"1",0,1,1,"${part_name}"`);
+  lines.push(`TEXT ${infoX},${R.nmV},"1",0,1,1,"${trunc(part_name)}"`);
 
   if (showNew) {
     lines.push(`BAR ${divX},${R.nmS},${rW},1`);
     boldLabel(infoX, R.npL, "New Part No:");
-    lines.push(`TEXT ${infoX},${R.npV},"1",0,1,1,"${new_part_no}"`);
+    lines.push(`TEXT ${infoX},${R.npV},"1",0,1,1,"${trunc(new_part_no)}"`);
     lines.push(`BAR ${divX},${R.npS},${rW},1`);
     boldLabel(infoX, R.nnL, "New Part Name:");
-    lines.push(`TEXT ${infoX},${R.nnV},"1",0,1,1,"${new_part_name}"`);
+    lines.push(`TEXT ${infoX},${R.nnV},"1",0,1,1,"${trunc(new_part_name)}"`);
   }
 
   if (showColor) {
     lines.push(`BAR ${divX},${showNew ? R.nnS ?? (R.nnV + 14) : R.nmS},${rW},1`);
     boldLabel(infoX, R.clL, "Color Name:");
-    lines.push(`TEXT ${infoX},${R.clV},"1",0,1,1,"${color_name}"`);
+    lines.push(`TEXT ${infoX},${R.clV},"1",0,1,1,"${trunc(color_name)}"`);
   }
 
   // ── Checkboxes ─────────────────────────────────────────────
-  lines.push(`BAR 4,228,496,2`);
+  lines.push(`BAR 4,216,472,2`);
 
   if (isMaster) lines.push(`BAR ${mX},${cbY},${cbSize},${cbSize}`);
   else          lines.push(`BOX ${mX},${cbY},${mX+cbSize},${cbY+cbSize},2`);
@@ -228,8 +232,8 @@ function buildLotLabel(lot, now) {
   lines.push(`TEXT ${cX+cbSize+4},${cbTextY},"1",0,1,1,"Co-ID"`);
 
   // ── Print Time ─────────────────────────────────────────────
-  lines.push(`BAR 4,262,496,2`);
-  lines.push(`TEXT 12,268,"1",0,1,1,"Print Time:  Date: ${dateStr}    Time: ${timeStr}"`);
+  lines.push(`BAR 4,242,472,2`);
+  lines.push(`TEXT 12,248,"1",0,1,1,"Print Time:  Date: ${dateStr}   Time: ${timeStr}"`);
 
   lines.push(`PRINT 1,1`, ``);
 
@@ -332,7 +336,8 @@ Write-Output "OK:\$written"
 //   4) เช็ค print_log → ข้าม lot ที่ปริ้นแล้ว
 // ════════════════════════════════════════════════════════════════
 async function printBarcode(req, res) {
-  const { tk_id, op_sc_id } = req.body;
+  const { tk_id, op_sc_id, reprint } = req.body;
+  const isReprint = reprint === true || reprint === "true";
 
   if (!tk_id)        return res.status(400).json({ ok: false, message: "tk_id is required" });
   if (!PRINTER_NAME) return res.status(500).json({ ok: false, message: "PRINTER_NAME not set in .env" });
@@ -431,11 +436,15 @@ async function printBarcode(req, res) {
     });
   }
 
-  // ── 4) กรอง lot ที่ยังไม่เคยปริ้น ───────────────────────
+  // ── 4) กรอง lot ที่ยังไม่เคยปริ้น (ถ้า reprint=true → ปริ้นทุก lot) ─
   const toPrint = [];
   const already_printed_lots = [];
 
   for (const lot of allLots) {
+    if (isReprint) {
+      toPrint.push(lot);
+      continue;
+    }
     let printed = false;
     try {
       const [rows] = await pool.query(
@@ -472,11 +481,17 @@ async function printBarcode(req, res) {
     });
   }
 
-  // ── 5) build TSPL + ปริ้น ────────────────────────────────
-  const tsplAll = toPrint.map(lot => buildLotLabel({ ...lot, tk_id }, now)).join("\r\n");
-
+  // ── 5) build TSPL + ปริ้น (ส่งทีละ label เพื่อป้องกัน buffer overflow) ──
+  const printResults = [];
   try {
-    const result = await sendToPrinter(tsplAll, PRINTER_NAME);
+    for (const lot of toPrint) {
+      const tspl = buildLotLabel({ ...lot, tk_id }, now);
+      const r = await sendToPrinter(tspl, PRINTER_NAME);
+      printResults.push(r);
+      // รอให้ printer flush buffer ก่อนรับ job ถัดไป (TSC TH240 @ SPEED 3)
+      await new Promise(resolve => setTimeout(resolve, 400));
+    }
+    const result = printResults.join(", ");
 
     const log_errors = [];
     for (const lot of toPrint) {

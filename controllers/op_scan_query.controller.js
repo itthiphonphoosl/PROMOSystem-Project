@@ -136,8 +136,9 @@ exports.getOpScanById = async (req, res) => {
     const row = rows[0];
     if (!row) return res.status(404).json({ message: "Not found", actor, op_sc_id });
 
-    // 1) lot ที่เกิดจาก op_scan นี้
-    const [incomingRows] = await pool.query(
+    // 1) lot ที่เกิดจาก op_scan นี้ — deduplicate by to_lot_no
+    //    Co-ID: หลาย from_lot → to_lot เดียวกัน → sum qty, เก็บ from_lots เป็น array
+    const [incomingRaw] = await pool.query(
       `SELECT
          t.to_lot_no AS lot_no,
          t.from_lot_no,
@@ -154,6 +155,27 @@ exports.getOpScanById = async (req, res) => {
        ORDER BY t.transfer_id ASC`,
       [op_sc_id]
     );
+    const incomingMap = new Map();
+    for (const r of incomingRaw) {
+      const key = r.lot_no;
+      if (!incomingMap.has(key)) {
+        incomingMap.set(key, {
+          lot_no:            r.lot_no,
+          tf_rs_code:        r.tf_rs_code,
+          qty:               0,
+          lot_parked_status: r.lot_parked_status,
+          color_id:          r.color_id,
+          color_no:          r.color_no,
+          color_name:        r.color_name,
+          transfer_ts:       r.transfer_ts,
+          from_lots:         [],
+        });
+      }
+      const entry = incomingMap.get(key);
+      entry.qty += Number(r.qty || 0);
+      if (r.from_lot_no) entry.from_lots.push(r.from_lot_no);
+    }
+    const incomingRows = Array.from(incomingMap.values());
 
     // 2) lot ล่าสุดทั้งหมดของ tk นี้ ที่ยัง active อยู่
     const [currentRows] = await pool.query(

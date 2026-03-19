@@ -113,14 +113,14 @@ async function getLotOwnerTk(conn, lot_no) {
 }
 
 // Un-park lot จาก TK อื่น (set lot_parked_status=0)
+// ✅ ไม่กรอง from_tk_id เพราะ auto-park INSERT อาจใช้ master_tk_id แทน owner_tk_id
 async function unParkCrossTkLot(conn, owner_tk_id, lot_no) {
   await conn.query(
     `UPDATE ${SAFE_TRANSFER}
      SET lot_parked_status = 0
-     WHERE from_tk_id       = ?
-       AND to_lot_no         = ?
+     WHERE to_lot_no         = ?
        AND lot_parked_status = 1`,
-    [String(owner_tk_id).trim(), String(lot_no).trim()]
+    [String(lot_no).trim()]
   );
 }
 
@@ -962,18 +962,18 @@ if (Number(headRows[0]?.tk_status) === 1) {
         }
 
         const [leafRows] = await conn.query(
-          `SELECT DISTINCT t.to_lot_no
+          `SELECT t.to_lot_no, t.from_lot_no, t.tf_rs_code, t.transfer_qty, t.color_id
            FROM ${SAFE_TRANSFER} t
+           INNER JOIN (
+             SELECT to_lot_no, MAX(transfer_id) AS max_id
+             FROM ${SAFE_TRANSFER}
+             WHERE (from_tk_id = ? OR to_tk_id = ?)
+             GROUP BY to_lot_no
+           ) latest ON latest.to_lot_no = t.to_lot_no AND latest.max_id = t.transfer_id
            WHERE (t.from_tk_id = ? OR t.to_tk_id = ?)
              AND t.lot_parked_status = 0
-             AND t.op_sc_id         != ?
-             AND t.to_lot_no NOT IN (
-               SELECT DISTINCT from_lot_no
-               FROM ${SAFE_TRANSFER}
-               WHERE (from_tk_id = ? OR to_tk_id = ?)
-                 AND from_lot_no IS NOT NULL
-             )`,
-          [master_tk_id, master_tk_id, op_sc_id, master_tk_id, master_tk_id]
+             AND t.op_sc_id         != ?`,
+          [master_tk_id, master_tk_id, master_tk_id, master_tk_id, op_sc_id]
         );
 
         // ── own-TK: park unused active lots ────────────────
@@ -990,7 +990,82 @@ if (Number(headRows[0]?.tk_status) === 1) {
                AND lot_parked_status = 0`,
             [actorSta, master_tk_id, master_tk_id, lotNo]
           );
+
+          // ✅ INSERT transfer row ใหม่สำหรับ op_sc_id ปัจจุบัน
+          //    เพื่อให้ auto-parked lot โชว์ใน transfer history ของ scan นี้
+          //    เช็คก่อนว่ายังไม่มี row ของ op_sc_id นี้ + to_lot_no นี้ (ป้องกัน duplicate)
+          const [dupCheck] = await conn.query(
+            `SELECT transfer_id FROM ${SAFE_TRANSFER}
+             WHERE op_sc_id = ? AND to_lot_no = ? AND lot_parked_status = 1 LIMIT 1`,
+            [op_sc_id, lotNo]
+          );
+          if (dupCheck.length === 0) {
+            await insertTransfer(conn, {
+              from_tk_id:       master_tk_id,
+              to_tk_id:         master_tk_id,
+              from_lot_no:      lr.from_lot_no || lotNo,
+              to_lot_no:        lotNo,
+              tf_rs_code:       lr.tf_rs_code ?? 2,
+              transfer_qty:     lr.transfer_qty ?? 0,
+              op_sc_id,
+              MC_id:            MC_id_val,
+              op_sta_id:        actorSta,
+              lot_parked_status: 1,
+              created_by_u_id:  actor.u_id,
+              transfer_ts:      now,
+              color_id:         lr.color_id ?? null,
+            });
+          }
+
           console.log(`[MARK_PARKED_OWN] lot=${lotNo} sta=${actorSta}`);
+        }
+
+        // ── base lot (tf_rs_code=0): อยู่ใน TKRunLog เท่านั้น ไม่มีใน t_transfer ─
+        //    ถ้าไม่ถูกเลือกใน usedFromLots → INSERT park row ใน t_transfer
+        //    (ไม่กระทบ logic อื่น เพราะเป็น INSERT ใหม่ ไม่แตะ row เดิม)
+        {
+          const [baseRows] = await conn.query(
+            `SELECT r.lot_no, r.part_id
+             FROM ${SAFE_RUNLOG} r
+             WHERE r.tk_id = ?
+             ORDER BY r.created_at_ts ASC
+             LIMIT 1`,
+            [master_tk_id]
+          );
+          const baseLot = baseRows[0]?.lot_no ? String(baseRows[0].lot_no).trim() : null;
+
+          if (baseLot && !usedFromLots.has(baseLot)) {
+            // เช็คว่า base lot ยังไม่มีใน t_transfer เลย (ยังไม่เคยถูก park)
+            const [existRows] = await conn.query(
+              `SELECT transfer_id FROM ${SAFE_TRANSFER}
+               WHERE to_lot_no = ? AND (from_tk_id = ? OR to_tk_id = ?)
+               LIMIT 1`,
+              [baseLot, master_tk_id, master_tk_id]
+            );
+
+            if (existRows.length === 0) {
+              // ยังไม่มีใน t_transfer เลย → INSERT park row ใหม่
+              // ใช้ good_qty จาก op_scan นี้ เพื่อไม่ติด CK_t_transfer_qty (qty > 0)
+              const baseLotQty = Math.max(1, Math.trunc(good_qty));
+
+              await insertTransfer(conn, {
+                from_tk_id:        master_tk_id,
+                to_tk_id:          master_tk_id,
+                from_lot_no:       baseLot,
+                to_lot_no:         baseLot,
+                tf_rs_code:        1,          // base lot = Master
+                transfer_qty:      baseLotQty,
+                op_sc_id,
+                MC_id:             MC_id_val,
+                op_sta_id:         actorSta,
+                lot_parked_status: 1,
+                created_by_u_id:   actor.u_id,
+                transfer_ts:       now,
+                color_id:          null,
+              });
+              console.log(`[MARK_PARKED_BASE] lot=${baseLot} qty=${baseLotQty} sta=${actorSta}`);
+            }
+          }
         }
 
         // ── cross-TK: lots พักจาก TK อื่นที่อยู่ใน station นี้แต่ไม่ถูกเลือก ─
