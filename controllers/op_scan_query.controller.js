@@ -406,13 +406,22 @@ if (Number(head.tk_active) !== 1 && actor.u_type === "op") {
     if (last_finished_op_sc_id) {
       const [inRows] = await pool.query(
         `SELECT
-           t.to_lot_no AS lot_no,
-           t.lot_parked_status,
+           t.to_lot_no         AS lot_no,
+           latest_s.lot_parked_status,
            SUM(t.transfer_qty) AS qty,
            MAX(t.transfer_ts)  AS last_ts
          FROM ${SAFE_TRANSFER} t
+         INNER JOIN (
+           SELECT t2.to_lot_no, t2.lot_parked_status
+           FROM ${SAFE_TRANSFER} t2
+           INNER JOIN (
+             SELECT to_lot_no, MAX(transfer_id) AS max_id
+             FROM ${SAFE_TRANSFER}
+             GROUP BY to_lot_no
+           ) mx ON mx.to_lot_no = t2.to_lot_no AND mx.max_id = t2.transfer_id
+         ) latest_s ON latest_s.to_lot_no = t.to_lot_no
          WHERE t.op_sc_id = ?
-         GROUP BY t.to_lot_no, t.lot_parked_status
+         GROUP BY t.to_lot_no, latest_s.lot_parked_status
          ORDER BY MAX(t.transfer_ts) DESC`,
         [last_finished_op_sc_id]
       );

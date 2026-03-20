@@ -322,22 +322,20 @@ Write-Output "OK:\$written"
 // ════════════════════════════════════════════════════════════════
 // POST /api/print/barcode
 //
-// Body:  { "tk_id": "TK2603130006" }
-//
-// Server ดึง DB เองทั้งหมด:
-//   1) TKHead  → ตรวจ tk_active
-//   2) t_transfer WHERE to_tk_id = tk_id
-//      → แต่ละ to_lot_no = 1 label
-//      → tf_rs_code ของ lot นั้น (1=Master 2=Split 3=Co-ID)
-//      → part_no/part_name จาก from_lot (ของเดิม)
-//      → new_part_no/new_part_name จาก to_lot (ของใหม่)
-//   3) ถ้า NO transfers → เอกสารพึ่งสร้าง
-//      → ดึง base lot จาก TKRunLog  tf_rs_code=0 (ไม่ทึบช่องไหน)
-//   4) เช็ค print_log → ข้าม lot ที่ปริ้นแล้ว
+// Body (เลือกใช้ตาม use case):
+//   { tk_id }                          → ปริ้นทุก lot ใหม่ของ TK
+//   { tk_id, op_sc_id }                → ปริ้นเฉพาะ scan นั้น (HH)
+//   { tk_id, op_sta_id }               → ปริ้นเฉพาะ lot ที่ gen จาก station นั้น (React reprint)
+//   { tk_id, lot_no }                  → ปริ้น lot เดี่ยว (ปุ่ม Print per row)
+//   { tk_id, reprint: true }           → ปริ้นซ้ำทุก lot
+//   { tk_id, op_sta_id, reprint:true } → ปริ้นซ้ำเฉพาะ station นั้น
 // ════════════════════════════════════════════════════════════════
 async function printBarcode(req, res) {
-  const { tk_id, op_sc_id, lot_no: single_lot_no, reprint } = req.body;
-  const isReprint = reprint === true || reprint === "true";
+  const { tk_id, op_sc_id, op_sta_id, lot_no: single_lot_no, reprint } = req.body;
+  const isReprint    = reprint === true || reprint === "true";
+  const filterBySta  = !!op_sta_id;
+  const filterByScan = !!op_sc_id;
+  const filterByLot  = !!single_lot_no;
 
   if (!tk_id)        return res.status(400).json({ ok: false, message: "tk_id is required" });
   if (!PRINTER_NAME) return res.status(500).json({ ok: false, message: "PRINTER_NAME not set in .env" });
@@ -345,10 +343,6 @@ async function printBarcode(req, res) {
   const pool      = getPool();
   const printedBy = req.user?.u_id || null;
   const now       = new Date();
-  // op_sc_id (optional) — ปริ้นเฉพาะ lot ของ scan นั้น (from≠to)
-  // lot_no   (optional) — ปริ้น lot เดี่ยวๆ (จากปุ่ม Print ต่อ row ใน React PC)
-  const filterByScan  = !!op_sc_id;
-  const filterByLot   = !!single_lot_no;
 
   // ── 1) ตรวจ TKHead ───────────────────────────────────────
   let headRow;
@@ -364,12 +358,64 @@ async function printBarcode(req, res) {
   if (!headRow)               return res.status(404).json({ ok: false, message: `ไม่พบเอกสาร tk_id=${tk_id}` });
   if (!Number(headRow.tk_active)) return res.status(403).json({ ok: false, message: "เอกสารนี้ถูกปิดใช้งาน" });
 
+  // ── 1b) ถ้ามี op_sta_id → ตรวจว่า TK เคยผ่าน station นี้จริงไหม ──
+  if (filterBySta) {
+    try {
+      const [staRows] = await pool.query(
+        `SELECT sc.op_sc_id, s.op_sta_name
+         FROM \`op_scan\` sc
+         LEFT JOIN \`op_station\` s ON s.op_sta_id = sc.op_sta_id
+         WHERE sc.tk_id = ? AND sc.op_sta_id = ?
+         LIMIT 1`,
+        [tk_id, op_sta_id]
+      );
+      if (staRows.length === 0) {
+        const [doneRows] = await pool.query(
+          `SELECT DISTINCT sc.op_sta_id, s.op_sta_name
+           FROM \`op_scan\` sc
+           LEFT JOIN \`op_station\` s ON s.op_sta_id = sc.op_sta_id
+           WHERE sc.tk_id = ?
+           ORDER BY sc.op_sc_id ASC`,
+          [tk_id]
+        );
+        const doneList = doneRows.length > 0
+          ? doneRows.map(r => `${r.op_sta_id} (${r.op_sta_name || '-'})`).join(", ")
+          : "ยังไม่มี station ที่ทำงาน";
+        return res.status(404).json({
+          ok: false,
+          message: `${tk_id} ไม่มีการทำงานที่ station "${op_sta_id}" — station ที่ทำงานจริงใน TK นี้: ${doneList}`,
+          tk_id,
+          op_sta_id_requested: op_sta_id,
+          stations_worked: doneRows.map(r => ({ op_sta_id: r.op_sta_id, op_sta_name: r.op_sta_name })),
+        });
+      }
+    } catch (e) {
+      return res.status(500).json({ ok: false, message: "DB error (op_scan station check): " + e.message });
+    }
+  }
+
   // ── 2) ดึง lots จาก t_transfer ───────────────────────────
-  //   ถ้ามี op_sc_id → เฉพาะ lot ใหม่ของ scan นั้น (from_lot ≠ to_lot = gen ใหม่)
-  //                    รวม lot พัก (parked=1) ที่ gen ใหม่ด้วย
-  //   ถ้าไม่มี       → ทุก lot active (lot_parked_status=0) ของ TK
+  //   op_sta_id → JOIN op_scan เพื่อกรองเฉพาะ lot ที่ gen จาก station นั้น
+  //   op_sc_id  → เฉพาะ scan นั้น (HH)
+  //   lot_no    → lot เดี่ยว
+  //   (ไม่มี)   → ทุก lot ใหม่ของ TK
   let transferLots = [];
   try {
+    let subWhere = "WHERE to_tk_id = ?";
+    const subParams = [tk_id];
+
+    if (filterByLot) {
+      subWhere += " AND to_lot_no = ?";
+      subParams.push(single_lot_no);
+    } else if (filterByScan) {
+      subWhere += " AND op_sc_id = ?";
+      subParams.push(op_sc_id);
+    }
+
+    const outerWhere = filterByLot ? "t.to_lot_no = ?" : "t.from_lot_no != t.to_lot_no";
+    const staJoin    = filterBySta ? "INNER JOIN `op_scan` osc ON osc.op_sc_id = t.op_sc_id AND osc.op_sta_id = ?" : "";
+    const staParam   = filterBySta ? [op_sta_id] : [];
+
     const [rows] = await pool.query(
       `SELECT
          t.to_lot_no           AS lot_no,
@@ -382,11 +428,11 @@ async function printBarcode(req, res) {
          tp.part_name          AS new_part_name,
          cp.color_name         AS color_name
        FROM \`t_transfer\` t
+       ${staJoin}
        INNER JOIN (
          SELECT to_lot_no, MAX(transfer_id) AS max_id
          FROM \`t_transfer\`
-         WHERE to_tk_id = ?
-         ${filterByLot ? "AND to_lot_no = ?" : filterByScan ? "AND op_sc_id = ?" : ""}
+         ${subWhere}
          GROUP BY to_lot_no
        ) latest ON latest.to_lot_no = t.to_lot_no AND latest.max_id = t.transfer_id
        LEFT JOIN \`TKRunLog\`       frl ON frl.lot_no  = t.from_lot_no
@@ -394,12 +440,9 @@ async function printBarcode(req, res) {
        LEFT JOIN \`TKRunLog\`       trl ON trl.lot_no  = t.to_lot_no
        LEFT JOIN \`part\`           tp  ON tp.part_id  = trl.part_id
        LEFT JOIN \`color_painting\`  cp  ON cp.color_id = t.color_id
-       WHERE ${filterByLot ? "1=1" : "t.from_lot_no != t.to_lot_no"}
-       ${filterByLot ? "AND t.to_lot_no = ?" : filterByScan ? "" : "AND t.lot_parked_status = 0"}
+       WHERE ${outerWhere}
        ORDER BY t.transfer_id ASC`,
-      filterByLot  ? [tk_id, single_lot_no, single_lot_no] :
-      filterByScan ? [tk_id, op_sc_id] :
-                     [tk_id, tk_id]
+      [...staParam, ...subParams, ...(filterByLot ? [single_lot_no] : [])]
     );
     transferLots = rows;
   } catch (e) {
@@ -445,7 +488,9 @@ async function printBarcode(req, res) {
   if (allLots.length === 0) {
     return res.status(404).json({
       ok: false,
-      message: filterByScan
+      message: filterBySta
+        ? `${tk_id} ไม่มี lot ที่ gen ใหม่จาก station "${op_sta_id}" — อาจยังไม่ได้ทำงานหรือทุก lot เป็น lot เดิม (from=to)`
+        : filterByScan
         ? `ไม่พบ Lot active สำหรับ op_sc_id=${op_sc_id} (อาจเป็น lot พักทั้งหมด)`
         : `ไม่พบข้อมูล Lot สำหรับ tk_id=${tk_id}`,
     });

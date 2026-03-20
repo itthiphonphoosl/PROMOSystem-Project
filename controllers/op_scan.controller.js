@@ -981,14 +981,16 @@ if (Number(headRows[0]?.tk_status) === 1) {
           const lotNo = (lr.to_lot_no || "").trim();
           if (!lotNo || usedFromLots.has(lotNo)) continue;
 
+          // ✅ อัปเดตแค่ lot_parked_status — ไม่แก้ op_sta_id ของ row เดิม
+          //    เพราะ op_sta_id เดิมคือ station ที่ gen lot นั้น ห้ามแก้ย้อนหลัง
+          //    station ที่พักจริง (actorSta) จะถูกบันทึกใน INSERT row ใหม่ด้านล่าง
           await conn.query(
             `UPDATE ${SAFE_TRANSFER}
-             SET lot_parked_status = 1,
-                 op_sta_id         = ?
+             SET lot_parked_status = 1
              WHERE (from_tk_id = ? OR to_tk_id = ?)
                AND to_lot_no         = ?
                AND lot_parked_status = 0`,
-            [actorSta, master_tk_id, master_tk_id, lotNo]
+            [master_tk_id, master_tk_id, lotNo]
           );
 
           // ✅ INSERT transfer row ใหม่สำหรับ op_sc_id ปัจจุบัน

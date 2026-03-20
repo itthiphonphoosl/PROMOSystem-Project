@@ -152,7 +152,7 @@ exports.createTkDoc = async (req, res) => {
       await conn.commit();
       conn.release();
 
-      console.log(`[TKDOC_CREATE] tk_id=${tk_id} part_no=${partRow.part_no} created_by_u_id=${actor.u_id}`);
+      console.log(`[TKDOC_CREATE] tk_id=${tk_id} lot_no=${lot_no} created_by_u_id=${actor.u_id}`);
 
       return res.status(201).json({
         message:     "Created TK document",
