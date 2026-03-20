@@ -136,9 +136,8 @@ exports.getOpScanById = async (req, res) => {
     const row = rows[0];
     if (!row) return res.status(404).json({ message: "Not found", actor, op_sc_id });
 
-    // 1) lot ที่เกิดจาก op_scan นี้ — deduplicate by to_lot_no
-    //    Co-ID: หลาย from_lot → to_lot เดียวกัน → sum qty, เก็บ from_lots เป็น array
-    const [incomingRaw] = await pool.query(
+    // 1) lot ที่เกิดจาก op_scan นี้
+    const [incomingRows] = await pool.query(
       `SELECT
          t.to_lot_no AS lot_no,
          t.from_lot_no,
@@ -155,27 +154,6 @@ exports.getOpScanById = async (req, res) => {
        ORDER BY t.transfer_id ASC`,
       [op_sc_id]
     );
-    const incomingMap = new Map();
-    for (const r of incomingRaw) {
-      const key = r.lot_no;
-      if (!incomingMap.has(key)) {
-        incomingMap.set(key, {
-          lot_no:            r.lot_no,
-          tf_rs_code:        r.tf_rs_code,
-          qty:               0,
-          lot_parked_status: r.lot_parked_status,
-          color_id:          r.color_id,
-          color_no:          r.color_no,
-          color_name:        r.color_name,
-          transfer_ts:       r.transfer_ts,
-          from_lots:         [],
-        });
-      }
-      const entry = incomingMap.get(key);
-      entry.qty += Number(r.qty || 0);
-      if (r.from_lot_no) entry.from_lots.push(r.from_lot_no);
-    }
-    const incomingRows = Array.from(incomingMap.values());
 
     // 2) lot ล่าสุดทั้งหมดของ tk นี้ ที่ยัง active อยู่
     const [currentRows] = await pool.query(
@@ -705,8 +683,28 @@ exports.lookupTkByLotNo = async (req, res) => {
     if (Number(tkHead.tk_status) === 4) {
       return res.status(403).json({ message: "เอกสาร Tracking No. นี้ถูก Cancel ไปแล้ว", actor, lot_no, tk_id });
     }
+    // ✅ tk_status=1 (finished) → return 200 พร้อม is_finished=true
+    //    Flutter จะแสดง alert แล้วเด้งไป Summary แทนการ block
     if (Number(tkHead.tk_status) === 1) {
-      return res.status(403).json({ message: "Tracking No. นี้ดำเนินการเสร็จสิ้นแล้ว ไม่สามารถเริ่มงานได้", actor, lot_no, tk_id });
+      // ดึง station สุดท้ายที่ finish (STA007)
+      const [lastStaRows] = await pool.query(
+        `SELECT s.op_sta_id, st.op_sta_name
+         FROM \`op_scan\` s
+         LEFT JOIN \`op_station\` st ON st.op_sta_id = s.op_sta_id
+         WHERE s.tk_id = ? AND s.op_sc_finish_ts IS NOT NULL
+         ORDER BY s.op_sc_finish_ts DESC
+         LIMIT 1`,
+        [tk_id]
+      );
+      const lastSta = lastStaRows[0];
+      return res.json({
+        actor, lot_no, tk_id,
+        tk_status: 1,
+        is_finished: true,
+        finished_at_sta_id:   lastSta?.op_sta_id   ?? null,
+        finished_at_sta_name: lastSta?.op_sta_name ?? null,
+        message: `Lot No. นี้ เสร็จงานที่ ${lastSta?.op_sta_id ?? ''} (${lastSta?.op_sta_name ?? ''}) เรียบร้อย`,
+      });
     }
 
     const [parkedRows] = await pool.query(
