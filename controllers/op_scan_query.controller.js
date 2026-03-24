@@ -692,10 +692,37 @@ exports.lookupTkByLotNo = async (req, res) => {
     if (Number(tkHead.tk_status) === 4) {
       return res.status(403).json({ message: "เอกสาร Tracking No. นี้ถูก Cancel ไปแล้ว", actor, lot_no, tk_id });
     }
-    // ✅ tk_status=1 (finished) → return 200 พร้อม is_finished=true
-    //    Flutter จะแสดง alert แล้วเด้งไป Summary แทนการ block
+    // ✅ [FIX] เช็ค parked ก่อน finished เสมอ
+    //    เหตุผล: lot พักได้แม้ tk_status=1 (2 state นี้ independent กัน)
+    //    เดิม: เช็ค finished ก่อน → lot-000017 (parked STA004, tk finished) ขึ้น "เสร็จงาน" ผิด
+    //    แก้: เช็ค parked ก่อน → ถ้าพัก return 403 parked_at_sta ทันที ไม่ต้องสนใจ tk_status
+    const [parkedRows] = await pool.query(
+      `SELECT t.lot_parked_status, t.op_sta_id, s.op_sta_name
+       FROM \`t_transfer\` t
+       LEFT JOIN \`op_station\` s ON s.op_sta_id = t.op_sta_id
+       WHERE t.to_lot_no = ?
+       ORDER BY t.transfer_id DESC
+       LIMIT 1`,
+      [lot_no]
+    );
+
+    const parkedRow = parkedRows[0];
+    if (parkedRow && (parkedRow.lot_parked_status === 1 || parkedRow.lot_parked_status === true)) {
+      const parkedSta     = parkedRow.op_sta_id   ?? "-";
+      const parkedStaName = parkedRow.op_sta_name ?? "-";
+      return res.status(403).json({
+        message: `Lot "${lot_no}" ถูกพักไว้ที่ ${parkedSta} (${parkedStaName}) ยังไม่สามารถเริ่มงานได้`,
+        actor,
+        lot_no,
+        tk_id,
+        parked:        true,
+        parked_at_sta: parkedSta,
+        parked_at_sta_name: parkedStaName,
+      });
+    }
+
+    // ✅ ตรวจ finished หลัง parked — ถ้าไม่พักแล้วค่อยดู tk_status=1
     if (Number(tkHead.tk_status) === 1) {
-      // ดึง station สุดท้ายที่ finish (STA007)
       const [lastStaRows] = await pool.query(
         `SELECT s.op_sta_id, st.op_sta_name
          FROM \`op_scan\` s
@@ -713,27 +740,6 @@ exports.lookupTkByLotNo = async (req, res) => {
         finished_at_sta_id:   lastSta?.op_sta_id   ?? null,
         finished_at_sta_name: lastSta?.op_sta_name ?? null,
         message: `Lot No. นี้ เสร็จงานที่ ${lastSta?.op_sta_id ?? ''} (${lastSta?.op_sta_name ?? ''}) เรียบร้อย`,
-      });
-    }
-
-    const [parkedRows] = await pool.query(
-      `SELECT lot_parked_status, op_sta_id
-       FROM \`t_transfer\`
-       WHERE to_lot_no = ?
-       ORDER BY transfer_ts DESC
-       LIMIT 1`,
-      [lot_no]
-    );
-
-    const parkedRow = parkedRows[0];
-    if (parkedRow && (parkedRow.lot_parked_status === 1 || parkedRow.lot_parked_status === true)) {
-      const parkedSta = parkedRow.op_sta_id ?? "-";
-      return res.status(403).json({
-        message: `Lot "${lot_no}" ถูกพักไว้ที่ ${parkedSta} ยังไม่สามารถเริ่มงานได้`,
-        actor,
-        lot_no,
-        tk_id,
-        parked_at_sta: parkedSta,
       });
     }
 

@@ -112,9 +112,10 @@ async function getLotOwnerTk(conn, lot_no) {
   return rows[0]?.tk_id ? String(rows[0].tk_id).trim() : null;
 }
 
-// Un-park lot จาก TK อื่น (set lot_parked_status=0)
-// ✅ ไม่กรอง from_tk_id เพราะ auto-park INSERT อาจใช้ master_tk_id แทน owner_tk_id
-async function unParkCrossTkLot(conn, owner_tk_id, lot_no) {
+// ✅ [FIX BUG2] unPark lot — ใช้ได้ทั้ง same-TK และ cross-TK
+// เดิมชื่อ unParkCrossTkLot และมีเงื่อนไข if (ownerTk !== master_tk_id)
+// แก้: เรียกได้เสมอ ไม่ต้องเช็ค TK ownership
+async function unParkLot(conn, lot_no) {
   await conn.query(
     `UPDATE ${SAFE_TRANSFER}
      SET lot_parked_status = 0
@@ -174,30 +175,29 @@ exports.startOpScan = async (req, res) => {
     try {
       const now = new Date();
 
-     // ใหม่ — เพิ่ม tk_active ใน SELECT แล้วเช็คก่อน FINISHED
-const [headRows] = await conn.query(
-  `SELECT tk_status, tk_active FROM \`TKHead\` WHERE tk_id = ? LIMIT 1`,
-  [tk_id]
-);
-const headRow    = headRows[0];
-const headStatus = Number(headRow?.tk_status ?? -1);
-if (headStatus === -1) {
-  await conn.rollback(); conn.release();
-  return res.status(404).json({ message: "ไม่พบ Tracking No. นี้ในระบบ", actor, tk_id });
-}
-// ✅ เพิ่ม: block ถ้าเอกสารถูกปิด
-if (Number(headRow?.tk_active) !== 1) {
-  await conn.rollback(); conn.release();
-  return res.status(403).json({ message: "เอกสารนี้ถูกปิดใช้งานอยู่ กรุณาติดต่อ Admin", actor, tk_id, tk_active: Number(headRow?.tk_active) });
-}
-if (headStatus === 4) {
-  await conn.rollback(); conn.release();
-  return res.status(403).json({ message: "เอกสาร Tracking No. นี้ถูก Cancel ไปแล้ว", actor, tk_id });
-}
-if (headStatus === 1) {
-  await conn.rollback(); conn.release();
-  return res.status(403).json({ message: "Tracking No. นี้ดำเนินการเสร็จสิ้นแล้ว ไม่สามารถเริ่มงานได้", actor, tk_id });
-}
+      // ① TKHead status check
+      const [headRows] = await conn.query(
+        `SELECT tk_status, tk_active FROM \`TKHead\` WHERE tk_id = ? LIMIT 1`,
+        [tk_id]
+      );
+      const headRow    = headRows[0];
+      const headStatus = Number(headRow?.tk_status ?? -1);
+      if (headStatus === -1) {
+        await conn.rollback(); conn.release();
+        return res.status(404).json({ message: "ไม่พบ Tracking No. นี้ในระบบ", actor, tk_id });
+      }
+      if (Number(headRow?.tk_active) !== 1) {
+        await conn.rollback(); conn.release();
+        return res.status(403).json({ message: "เอกสารนี้ถูกปิดใช้งานอยู่ กรุณาติดต่อ Admin", actor, tk_id, tk_active: Number(headRow?.tk_active) });
+      }
+      if (headStatus === 4) {
+        await conn.rollback(); conn.release();
+        return res.status(403).json({ message: "เอกสาร Tracking No. นี้ถูก Cancel ไปแล้ว", actor, tk_id });
+      }
+      if (headStatus === 1) {
+        await conn.rollback(); conn.release();
+        return res.status(403).json({ message: "Tracking No. นี้ดำเนินการเสร็จสิ้นแล้ว ไม่สามารถเริ่มงานได้", actor, tk_id });
+      }
 
       // ② TKDetail
       const [tkDetailRows] = await conn.query(
@@ -232,10 +232,19 @@ if (headStatus === 1) {
       const base_run_no = baseLotRow?.run_no ? String(baseLotRow.run_no).trim() : null;
 
       // ③.b leaf lots
+      // ✅ [FIX BUG3] ใช้ MAX(transfer_id) dedup — ดึงเฉพาะ latest row ต่อ to_lot_no
+      // เดิม: SELECT ทุก row → lot ที่มีทั้ง parked=0 เก่า + parked=1 ใหม่ เข้า current_lots ผิด
       const [tRows2] = await conn.query(
-        `SELECT from_lot_no, to_lot_no, lot_parked_status
-         FROM ${SAFE_TRANSFER}
-         WHERE from_tk_id = ? OR to_tk_id = ?`,
+        `SELECT t.from_lot_no, t.to_lot_no, t.lot_parked_status
+         FROM ${SAFE_TRANSFER} t
+         INNER JOIN (
+           SELECT to_lot_no, MAX(transfer_id) AS max_id
+           FROM ${SAFE_TRANSFER}
+           WHERE from_tk_id = ? OR to_tk_id = ?
+           GROUP BY to_lot_no
+         ) latest
+           ON latest.to_lot_no = t.to_lot_no
+          AND latest.max_id    = t.transfer_id`,
         [tk_id, tk_id]
       );
       const tRows   = tRows2 || [];
@@ -609,7 +618,7 @@ exports.finishOpScan = async (req, res) => {
         return res.status(403).json({ message: `Scan started at ${scanSta} but you login as ${actorSta}`, actor, op_sc_id });
       }
 
-      // ✅ เริ่มที่ใครต้องเสร็จที่คนนั้น
+      // เริ่มที่ใครต้องเสร็จที่คนนั้น
       if (Number(row.u_id) !== Number(actor.u_id)) {
         const [ownerRows] = await conn.query(
           `SELECT u_firstname, u_lastname FROM \`user\` WHERE u_id = ? LIMIT 1`,
@@ -629,20 +638,19 @@ exports.finishOpScan = async (req, res) => {
       const master_tk_id = String(row.tk_id || "").trim();
 
       // ③ TKHead ต้องไม่ FINISHED
-    // ใหม่ — เพิ่ม tk_active ใน SELECT แล้วเช็คก่อน FINISHED
-const [headRows] = await conn.query(
-  `SELECT tk_status, tk_active FROM \`TKHead\` WHERE tk_id = ? LIMIT 1`,
-  [master_tk_id]
-);
-//  เพิ่ม: block ถ้าเอกสารถูกปิด
-if (Number(headRows[0]?.tk_active) !== 1) {
-  await conn.rollback(); conn.release();
-  return res.status(403).json({ message: "เอกสารนี้ถูกปิดใช้งานอยู่ กรุณาติดต่อ Admin", actor, tk_id: master_tk_id, tk_active: Number(headRows[0]?.tk_active) });
-}
-if (Number(headRows[0]?.tk_status) === 1) {
-  await conn.rollback(); conn.release();
-  return res.status(403).json({ message: "This tk_id is FINISHED. Cannot finish again.", actor, tk_id: master_tk_id });
-}
+      const [headRows] = await conn.query(
+        `SELECT tk_status, tk_active FROM \`TKHead\` WHERE tk_id = ? LIMIT 1`,
+        [master_tk_id]
+      );
+      if (Number(headRows[0]?.tk_active) !== 1) {
+        await conn.rollback(); conn.release();
+        return res.status(403).json({ message: "เอกสารนี้ถูกปิดใช้งานอยู่ กรุณาติดต่อ Admin", actor, tk_id: master_tk_id, tk_active: Number(headRows[0]?.tk_active) });
+      }
+      if (Number(headRows[0]?.tk_status) === 1) {
+        await conn.rollback(); conn.release();
+        return res.status(403).json({ message: "This tk_id is FINISHED. Cannot finish again.", actor, tk_id: master_tk_id });
+      }
+
       // ④ base lot
       const [baseDetailRows] = await conn.query(
         `SELECT lot_no, part_id FROM ${SAFE_TKDETAIL}
@@ -746,9 +754,10 @@ if (Number(headRows[0]?.tk_status) === 1) {
           );
 
           const fromOwnerTk_1 = (await getLotOwnerTk(conn, from_lot)) || master_tk_id;
-          if (fromOwnerTk_1 !== master_tk_id) {
-            await unParkCrossTkLot(conn, fromOwnerTk_1, from_lot);
-          }
+          // ✅ [FIX BUG2] เรียก unParkLot เสมอ ไม่เช็ค TK ownership
+          // เดิม: if (fromOwnerTk_1 !== master_tk_id) { await unParkCrossTkLot(...) }
+          // แก้: same-TK ที่ถูก auto-park ก็ต้องถูก unpark เมื่อถูกนำมาใช้
+          await unParkLot(conn, from_lot);
 
           await insertTransfer(conn, {
             from_tk_id: fromOwnerTk_1, to_tk_id: master_tk_id,
@@ -776,9 +785,8 @@ if (Number(headRows[0]?.tk_status) === 1) {
           const splits   = Array.isArray(g.splits) ? g.splits : [];
 
           const fromOwnerTk_2 = (await getLotOwnerTk(conn, from_lot)) || master_tk_id;
-          if (fromOwnerTk_2 !== master_tk_id) {
-            await unParkCrossTkLot(conn, fromOwnerTk_2, from_lot);
-          }
+          // ✅ [FIX BUG2] เรียก unParkLot เสมอ ไม่เช็ค TK ownership
+          await unParkLot(conn, from_lot);
 
           const group_qty_tf2 = Math.trunc(Number(g.qty));
           const sumUsed   = splits.reduce((a, s) => a + Math.trunc(Number(s.qty)), 0);
@@ -881,9 +889,10 @@ if (Number(headRows[0]?.tk_status) === 1) {
           for (const m of g.merge_lots) {
             const mLotNo = String(m.from_lot_no).trim();
             const mergeOwnerTk = (await getLotOwnerTk(conn, mLotNo)) || master_tk_id;
-            if (mergeOwnerTk !== master_tk_id) {
-              await unParkCrossTkLot(conn, mergeOwnerTk, mLotNo);
-            }
+            // ✅ [FIX BUG2] เรียก unParkLot เสมอ ไม่เช็ค TK ownership
+            // เดิม: if (mergeOwnerTk !== master_tk_id) { await unParkCrossTkLot(...) }
+            // แก้: same-TK lot ที่ถูก auto-park ก็ต้องถูก unpark เมื่อถูกนำมาใช้ใน Co-ID
+            await unParkLot(conn, mLotNo);
             await insertTransfer(conn, {
               from_tk_id: mergeOwnerTk, to_tk_id: master_tk_id,
               from_lot_no: mLotNo, to_lot_no: lot_no,
@@ -903,9 +912,8 @@ if (Number(headRows[0]?.tk_status) === 1) {
               if (!pLotNo || pQty <= 0) continue;
 
               const plOwnerTk = (await getLotOwnerTk(conn, pLotNo)) || master_tk_id;
-              if (plOwnerTk !== master_tk_id) {
-                await unParkCrossTkLot(conn, plOwnerTk, pLotNo);
-              }
+              // ✅ [FIX BUG2] เรียก unParkLot เสมอ
+              await unParkLot(conn, pLotNo);
 
               const pPartId = await getPartIdByLotNo(conn, plOwnerTk, pLotNo)
                            || await getPartIdByLotNo(conn, master_tk_id, pLotNo);
@@ -945,7 +953,7 @@ if (Number(headRows[0]?.tk_status) === 1) {
         }
       }
 
-      // ⑦.pre — mark unused leaf lots as parked
+      // ⑦.pre — mark unused leaf lots as parked (INSERT-only, ไม่แตะ row เดิม)
       {
         const usedFromLots = new Set();
         for (const g of groups) {
@@ -961,6 +969,16 @@ if (Number(headRows[0]?.tk_status) === 1) {
           }
         }
 
+        // ✅ [FIX BUG4] กัน lot ที่ถูก Co-ID ไปแล้ว (consumed) ไม่ให้ถูก auto-park ซ้ำ
+        //
+        //    เดิม (version แรก): NOT EXISTS กว้างเกินไป → เจอ Split row เดิม (from=lot1,to=lot2)
+        //          → คิดว่า lot1 consumed แล้ว → ไม่ park lot1 ทั้งที่ควร (bug นี้)
+        //
+        //    แก้: เช็คเฉพาะ Co-ID (tf=3, parked=0) เท่านั้น
+        //         เหตุผล: มีแค่ Co-ID ที่ "กิน" lot จริงๆ (merge เข้า lot ใหม่)
+        //         Split: lot1 → lot2,lot3 แต่ lot1 ยังมีชีวิตผ่าน from=lot1,to=lot1 row
+        //         Master-ID: from=lot1,to=lot1 ไม่ได้เปลี่ยน lot
+        //         Co-ID: from=lot1,to=lot6 (different) → lot1 หายไปจริงๆ
         const [leafRows] = await conn.query(
           `SELECT t.to_lot_no, t.from_lot_no, t.tf_rs_code, t.transfer_qty, t.color_id
            FROM ${SAFE_TRANSFER} t
@@ -972,30 +990,28 @@ if (Number(headRows[0]?.tk_status) === 1) {
            ) latest ON latest.to_lot_no = t.to_lot_no AND latest.max_id = t.transfer_id
            WHERE (t.from_tk_id = ? OR t.to_tk_id = ?)
              AND t.lot_parked_status = 0
-             AND t.op_sc_id         != ?`,
-          [master_tk_id, master_tk_id, master_tk_id, master_tk_id, op_sc_id]
+             AND t.op_sc_id         != ?
+             AND NOT EXISTS (
+               SELECT 1 FROM ${SAFE_TRANSFER} t2
+               WHERE t2.from_lot_no      = t.to_lot_no
+                 AND t2.to_lot_no       != t.to_lot_no
+                 AND t2.tf_rs_code       = 3
+                 AND t2.lot_parked_status = 0
+                 AND (t2.from_tk_id = ? OR t2.to_tk_id = ?)
+             )`,
+          [master_tk_id, master_tk_id, master_tk_id, master_tk_id, op_sc_id, master_tk_id, master_tk_id]
         );
 
         // ── own-TK: park unused active lots ────────────────
+        // ✅ [FIX BUG1] ลบ UPDATE block ออก — ไม่แก้ row เดิมที่เป็น history ของ station ก่อนหน้า
+        //    ใช้ INSERT-only เพื่อบันทึก park event ที่ station ปัจจุบัน (actorSta)
+        //    เดิมมี UPDATE lot_parked_status=1 → ทำให้ K26-000001's STA002 row ถูกแก้เป็น parked
+        //    ซึ่งทำให้ lot โผล่ที่ STA002 แทนที่จะโผล่ที่ STA003 ที่พักจริง
         for (const lr of leafRows || []) {
           const lotNo = (lr.to_lot_no || "").trim();
           if (!lotNo || usedFromLots.has(lotNo)) continue;
 
-          // ✅ อัปเดตแค่ lot_parked_status — ไม่แก้ op_sta_id ของ row เดิม
-          //    เพราะ op_sta_id เดิมคือ station ที่ gen lot นั้น ห้ามแก้ย้อนหลัง
-          //    station ที่พักจริง (actorSta) จะถูกบันทึกใน INSERT row ใหม่ด้านล่าง
-          await conn.query(
-            `UPDATE ${SAFE_TRANSFER}
-             SET lot_parked_status = 1
-             WHERE (from_tk_id = ? OR to_tk_id = ?)
-               AND to_lot_no         = ?
-               AND lot_parked_status = 0`,
-            [master_tk_id, master_tk_id, lotNo]
-          );
-
-          // ✅ INSERT transfer row ใหม่สำหรับ op_sc_id ปัจจุบัน
-          //    เพื่อให้ auto-parked lot โชว์ใน transfer history ของ scan นี้
-          //    เช็คก่อนว่ายังไม่มี row ของ op_sc_id นี้ + to_lot_no นี้ (ป้องกัน duplicate)
+          // เช็คก่อนว่ายังไม่มี park row ของ op_sc_id นี้ + to_lot_no นี้ (ป้องกัน duplicate)
           const [dupCheck] = await conn.query(
             `SELECT transfer_id FROM ${SAFE_TRANSFER}
              WHERE op_sc_id = ? AND to_lot_no = ? AND lot_parked_status = 1 LIMIT 1`,
@@ -1011,7 +1027,7 @@ if (Number(headRows[0]?.tk_status) === 1) {
               transfer_qty:     lr.transfer_qty ?? 0,
               op_sc_id,
               MC_id:            MC_id_val,
-              op_sta_id:        actorSta,
+              op_sta_id:        actorSta,        // ← station ที่พักจริง
               lot_parked_status: 1,
               created_by_u_id:  actor.u_id,
               transfer_ts:      now,
@@ -1024,7 +1040,6 @@ if (Number(headRows[0]?.tk_status) === 1) {
 
         // ── base lot (tf_rs_code=0): อยู่ใน TKRunLog เท่านั้น ไม่มีใน t_transfer ─
         //    ถ้าไม่ถูกเลือกใน usedFromLots → INSERT park row ใน t_transfer
-        //    (ไม่กระทบ logic อื่น เพราะเป็น INSERT ใหม่ ไม่แตะ row เดิม)
         {
           const [baseRows] = await conn.query(
             `SELECT r.lot_no, r.part_id
@@ -1046,8 +1061,6 @@ if (Number(headRows[0]?.tk_status) === 1) {
             );
 
             if (existRows.length === 0) {
-              // ยังไม่มีใน t_transfer เลย → INSERT park row ใหม่
-              // ใช้ good_qty จาก op_scan นี้ เพื่อไม่ติด CK_t_transfer_qty (qty > 0)
               const baseLotQty = Math.max(1, Math.trunc(good_qty));
 
               await insertTransfer(conn, {
@@ -1055,7 +1068,7 @@ if (Number(headRows[0]?.tk_status) === 1) {
                 to_tk_id:          master_tk_id,
                 from_lot_no:       baseLot,
                 to_lot_no:         baseLot,
-                tf_rs_code:        1,          // base lot = Master
+                tf_rs_code:        1,
                 transfer_qty:      baseLotQty,
                 op_sc_id,
                 MC_id:             MC_id_val,
