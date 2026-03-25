@@ -118,7 +118,7 @@ function buildLotLabel(lot, now) {
   const timeStr = `${hh}:${mi}:${ss}`;
 
   // ── Checkbox ───────────────────────────────────────────────
-  const cbY = 218, cbSize = 18, cbTextY = cbY + 3;
+  const cbY = 224, cbSize = 18, cbTextY = cbY + 3;
   const mX = 16, sX = 168, cX = 316;
 
   // ── Row Y: pitch 28 label→label ─────────────────────────────
@@ -232,8 +232,8 @@ function buildLotLabel(lot, now) {
   lines.push(`TEXT ${cX+cbSize+4},${cbTextY},"1",0,1,1,"Co-ID"`);
 
   // ── Print Time ─────────────────────────────────────────────
-  lines.push(`BAR 4,242,472,2`);
-  lines.push(`TEXT 12,248,"1",0,1,1,"Print Time:  Date: ${dateStr}   Time: ${timeStr}"`);
+  lines.push(`BAR 4,248,472,2`);
+  lines.push(`TEXT 12,254,"1",0,1,1,"Print Time:  Date: ${dateStr}   Time: ${timeStr}"`);
 
   lines.push(`PRINT 1,1`, ``);
 

@@ -231,19 +231,32 @@ async function logout(req, res) {
 }
 
 async function createUser(req, res) {
-  const username = String(req.body.username || "").trim();
-  const password = String(req.body.password || "").trim();
+  const username  = String(req.body.username  || "").trim();
   const firstname = String(req.body.firstname || "").trim();
   const lastname  = String(req.body.lastname  || "").trim();
-  const u_type   = String(req.body.u_type   || "").trim();
-  const active   = req.body.active === undefined ? 1 : Number(req.body.active);
+  const u_type    = String(req.body.u_type    || "").trim();
+  const active    = req.body.active === undefined ? 1 : Number(req.body.active);
 
-  if (!username || !password || !firstname || !u_type) {
-    return res.status(400).json({ message: "กรุณากรอก username, password, name, u_type" });
-  }
-
+  // validate u_type ก่อน เพราะ logic password ขึ้นกับ u_type
   if (!["op", "ad", "ma"].includes(u_type)) {
     return res.status(400).json({ message: "u_type ต้องเป็น op, ad, ma เท่านั้น" });
+  }
+
+  const isOperator = u_type === "op";
+
+  // op → ห้ามส่ง password มาเด็ดขาด
+  if (isOperator && req.body.password !== undefined) {
+    return res.status(400).json({ message: "Operator ไม่รองรับการตั้ง password" });
+  }
+
+  // ad / ma → บังคับ password
+  const password = !isOperator ? String(req.body.password || "").trim() : null;
+  if (!isOperator && !password) {
+    return res.status(400).json({ message: "กรุณากรอก password" });
+  }
+
+  if (!username || !firstname || !u_type) {
+    return res.status(400).json({ message: "กรุณากรอก username, firstname, u_type" });
   }
 
   try {
@@ -259,8 +272,9 @@ async function createUser(req, res) {
       return res.status(409).json({ message: "username นี้มีอยู่แล้ว" });
     }
 
-    const hashed = await bcrypt.hash(password, 10);
-    const now    = new Date();
+    // ad/ma → hash password, op → '' (empty string เพราะ u_password เป็น NOT NULL)
+    const storedPassword = isOperator ? "" : await bcrypt.hash(password, 10);
+    const now = new Date();
 
     const conn = await pool.getConnection();
     await conn.beginTransaction();
@@ -270,7 +284,7 @@ async function createUser(req, res) {
       await conn.query(
         `INSERT INTO \`user\` (u_username, u_password, u_firstname, u_lastname, u_type, u_active, u_created_ts, u_updated_ts)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [username, hashed, firstname, lastname, u_type, active, now, now]
+        [username, storedPassword, firstname, lastname, u_type, active, now, now]
       );
 
       const [[newRow]] = await conn.query(`SELECT LAST_INSERT_ID() AS u_id`);
@@ -282,13 +296,13 @@ async function createUser(req, res) {
       return res.status(201).json({
         message: "สร้างผู้ใช้สำเร็จ",
         user: {
-          u_id:      nextId,
-          u_username: username,
-          password:  "hash password",
+          u_id:        nextId,
+          u_username:  username,
+          ...(isOperator ? {} : { password: "hash password" }),
           u_firstname: firstname,
           u_lastname:  lastname,
           u_type,
-          u_active:  active,
+          u_active:    active,
         },
       });
     } catch (e) {

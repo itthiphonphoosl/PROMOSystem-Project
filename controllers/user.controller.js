@@ -138,7 +138,7 @@ async function updateUser(req, res) {
   if (u_lastname  !== undefined && !u_lastname)  return res.status(400).json({ message: "u_lastname ห้ามเป็นค่าว่าง" });
   if (u_username !== undefined && !u_username) return res.status(400).json({ message: "u_username ห้ามเป็นค่าว่าง" });
   if (u_password !== undefined && !u_password) return res.status(400).json({ message: "u_password ห้ามเป็นค่าว่าง" });
-  if (u_type     !== undefined && !["op", "ad"].includes(u_type)) return res.status(400).json({ message: "u_type ต้องเป็น op หรือ ad เท่านั้น" });
+  if (u_type     !== undefined && !["op", "ad", "ma"].includes(u_type)) return res.status(400).json({ message: "u_type ต้องเป็น op, ad หรือ ma เท่านั้น" });
   if (u_active   !== undefined && ![0, 1].includes(u_active))     return res.status(400).json({ message: "u_active ต้องเป็น 0 หรือ 1 เท่านั้น" });
 
   try {
@@ -149,15 +149,22 @@ async function updateUser(req, res) {
     await conn.beginTransaction();
 
     try {
-      // 1) เช็ค user มีจริง
+      // 1) เช็ค user มีจริง + ดึง u_type ของ target
       const [existRows] = await conn.query(
-        `SELECT u_id FROM \`user\` WHERE u_id = ? LIMIT 1`,
+        `SELECT u_id, u_type FROM \`user\` WHERE u_id = ? LIMIT 1`,
         [id]
       );
       if (existRows.length === 0) {
         await conn.rollback();
         conn.release();
         return res.status(404).json({ message: "User not found" });
+      }
+
+      // 2) Operator ไม่รองรับการตั้ง password
+      if (u_password !== undefined && existRows[0].u_type === "op") {
+        await conn.rollback();
+        conn.release();
+        return res.status(400).json({ message: "Operator ไม่รองรับการตั้ง password" });
       }
 
       // 2) ถ้าแก้ username ต้องกันซ้ำ
