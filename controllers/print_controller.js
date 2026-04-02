@@ -618,10 +618,7 @@ async function getPrintHistory(req, res) {
   }
 }
 
-// ════════════════════════════════════════════════════════════════
-// GET /api/print/test
-// ทดสอบเชื่อมต่อเครื่องปริ้น — feed กระดาษ 1 ใบเปล่า ไม่พิมพ์อะไร
-// ════════════════════════════════════════════════════════════════
+
 async function testPrinter(req, res) {
   if (!PRINTER_NAME) {
     return res.status(500).json({ ok: false, message: "PRINTER_NAME ยังไม่ได้ตั้งค่าใน .env" });
