@@ -385,7 +385,7 @@ exports.startOpScan = async (req, res) => {
           // คนเดียวกัน → return scan เดิมได้เลย (reload หน้า finish)
           await conn.rollback(); conn.release();
           return res.status(200).json({
-            message: "resuming",
+            message: "Lot No. นี้กำลังทำอยู่ในหน้า Active Scan", actor, tk_id,
             op_sc_id: activeScan.op_sc_id,
             tk_id,
             op_sta_id,

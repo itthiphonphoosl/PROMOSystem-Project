@@ -143,7 +143,7 @@ exports.getOpScanById = async (req, res) => {
          t.from_lot_no,
          t.tf_rs_code,
          t.transfer_qty AS qty,
-         t.lot_parked_status,
+         CAST(t.lot_parked_status AS UNSIGNED) AS lot_parked_status, -- ✅ FIX: CAST BIT→UNSIGNED
          t.color_id,
          cp.color_no,
          cp.color_name,
@@ -162,7 +162,7 @@ exports.getOpScanById = async (req, res) => {
          t.from_lot_no,
          t.tf_rs_code,
          t.transfer_qty AS qty,
-         t.lot_parked_status,
+         CAST(t.lot_parked_status AS UNSIGNED) AS lot_parked_status, -- ✅ FIX: CAST BIT→UNSIGNED
          t.color_id,
          cp.color_no,
          cp.color_name,
@@ -289,18 +289,18 @@ exports.getTkSummary = async (req, res) => {
     const pool = getPool();
 
     // 1) TKHead
-   // ใหม่ — เพิ่ม tk_active ใน SELECT + block operator
-const [headRows] = await pool.query(
-  `SELECT tk_id, tk_status, tk_active, created_by_u_id, tk_created_at_ts
-   FROM \`TKHead\` WHERE tk_id = ? LIMIT 1`,
-  [tk_id]
-);
-const head = headRows[0];
-if (!head) return res.status(404).json({ message: "ไม่พบ Tracking No. นี้ ไม่มีอยู่ในระบบ", actor, tk_id });
-// ✅ เพิ่ม: block operator ถ้าเอกสารถูกปิด
-if (Number(head.tk_active) !== 1 && actor.u_type === "op") {
-  return res.status(403).json({ message: "เอกสารนี้ถูกปิดใช้งานอยู่ กรุณาติดต่อ Admin", actor, tk_id, tk_active: Number(head.tk_active) });
-}
+    // ใหม่ — เพิ่ม tk_active ใน SELECT + block operator
+    const [headRows] = await pool.query(
+      `SELECT tk_id, tk_status, tk_active, created_by_u_id, tk_created_at_ts
+       FROM \`TKHead\` WHERE tk_id = ? LIMIT 1`,
+      [tk_id]
+    );
+    const head = headRows[0];
+    if (!head) return res.status(404).json({ message: "ไม่พบ Tracking No. นี้ ไม่มีอยู่ในระบบ", actor, tk_id });
+    // ✅ เพิ่ม: block operator ถ้าเอกสารถูกปิด
+    if (Number(head.tk_active) !== 1 && actor.u_type === "op") {
+      return res.status(403).json({ message: "เอกสารนี้ถูกปิดใช้งานอยู่ กรุณาติดต่อ Admin", actor, tk_id, tk_active: Number(head.tk_active) });
+    }
 
     // 2) TKDetail
     const [detailRows] = await pool.query(
@@ -340,7 +340,7 @@ if (Number(head.tk_active) !== 1 && actor.u_type === "op") {
          t.tf_rs_code, tr.tf_rs_name,
          t.transfer_qty, t.op_sc_id, t.op_sta_id, s.op_sta_name,
          t.MC_id, m.MC_name,
-         t.lot_parked_status,
+         CAST(t.lot_parked_status AS UNSIGNED) AS lot_parked_status, -- ✅ FIX: CAST BIT→UNSIGNED
          CASE t.lot_parked_status WHEN 0 THEN 'Active' WHEN 1 THEN 'Parked' END AS lot_status_name,
          t.color_id, cp.color_no, cp.color_name,
          t.created_by_u_id, u.u_firstname AS created_by_u_firstname, u.u_lastname AS created_by_u_lastname,
@@ -407,7 +407,7 @@ if (Number(head.tk_active) !== 1 && actor.u_type === "op") {
       const [inRows] = await pool.query(
         `SELECT
            t.to_lot_no         AS lot_no,
-           latest_s.lot_parked_status,
+           CAST(latest_s.lot_parked_status AS UNSIGNED) AS lot_parked_status, -- ✅ FIX: CAST BIT→UNSIGNED
            SUM(t.transfer_qty) AS qty,
            MAX(t.transfer_ts)  AS last_ts
          FROM ${SAFE_TRANSFER} t
@@ -592,6 +592,7 @@ exports.getParkedLots = async (req, res) => {
     return res.status(500).json({ message: "Get parked lots failed", actor, error: err.message });
   }
 };
+
 async function getCurrentActiveLotsByTk(pool, tk_id) {
   // หา latest row ของแต่ละ to_lot_no ใน tk นี้
   const [rows] = await pool.query(
@@ -600,7 +601,7 @@ async function getCurrentActiveLotsByTk(pool, tk_id) {
        x.from_lot_no,
        x.tf_rs_code,
        x.transfer_qty AS qty,
-       x.lot_parked_status,
+       CAST(x.lot_parked_status AS UNSIGNED) AS lot_parked_status, -- ✅ FIX: CAST BIT→UNSIGNED
        x.op_sta_id,
        x.op_sc_id,
        x.transfer_ts
@@ -650,6 +651,7 @@ async function getCurrentActiveLotsByTk(pool, tk_id) {
 
   return rows;
 }
+
 // ─────────────────────────────────────────────────────────
 // GET /api/op-scans/lookup-by-lot/:lot_no
 //
@@ -697,7 +699,8 @@ exports.lookupTkByLotNo = async (req, res) => {
     //    เดิม: เช็ค finished ก่อน → lot-000017 (parked STA004, tk finished) ขึ้น "เสร็จงาน" ผิด
     //    แก้: เช็ค parked ก่อน → ถ้าพัก return 403 parked_at_sta ทันที ไม่ต้องสนใจ tk_status
     const [parkedRows] = await pool.query(
-      `SELECT t.lot_parked_status, t.op_sta_id, s.op_sta_name
+      `SELECT CAST(t.lot_parked_status AS UNSIGNED) AS lot_parked_status, -- ✅ FIX: CAST BIT→UNSIGNED
+              t.op_sta_id, s.op_sta_name
        FROM \`t_transfer\` t
        LEFT JOIN \`op_station\` s ON s.op_sta_id = t.op_sta_id
        WHERE t.to_lot_no = ?
