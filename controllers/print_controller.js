@@ -15,6 +15,10 @@ const { getPool } = require("../config/db");
 const PRINTER_NAME = process.env.PRINTER_NAME;
 const PRINTER_IP   = process.env.PRINTER_IP || null;
 
+function extractRunNo(lotNo) {
+  const m = String(lotNo || "").trim().match(/-(\d+)$/);
+  return m ? m[1] : null;
+}
 // ════════════════════════════════════════════════════════════════
 // buildLotLabel  —  สร้าง TSPL 1 label ตาม layout ในรูป
 //
@@ -497,36 +501,60 @@ async function printBarcode(req, res) {
   }
 
   // ── 4) กรอง lot ที่ยังไม่เคยปริ้น (ถ้า reprint=true → ปริ้นทุก lot) ─
-  const toPrint = [];
-  const already_printed_lots = [];
+const toPrint = [];
+const already_printed_lots = [];
 
-  for (const lot of allLots) {
-    if (isReprint) {
-      toPrint.push(lot);
-      continue;
-    }
-    let printed = false;
-    try {
-      const [rows] = await pool.query(
-        `SELECT pl_id FROM print_log WHERE lot_no = ? AND status = 1 LIMIT 1`,
-        [lot.lot_no]
-      );
-      printed = rows.length > 0;
-    } catch (e) {
-      console.warn("[print_log check]", e.message);
-    }
-
-    if (printed) {
-      already_printed_lots.push({
-        lot_no:     lot.lot_no,
-        tf_rs_code: lot.tf_rs_code,
-        part_no:    lot.part_no,
-        part_name:  lot.part_name,
-      });
-    } else {
-      toPrint.push(lot);
-    }
+for (const lot of allLots) {
+  if (isReprint) {
+    toPrint.push(lot);
+    continue;
   }
+
+  let printed = false;
+  const runNo = extractRunNo(lot.lot_no);
+
+  try {
+    // 1) เช็ค lot_no ตรงตัวก่อน
+    let [rows] = await pool.query(
+      `SELECT pl_id
+       FROM print_log
+       WHERE lot_no = ? AND status = 1
+       LIMIT 1`,
+      [lot.lot_no]
+    );
+
+    printed = rows.length > 0;
+
+    // 2) ถ้ายังไม่เจอ ให้เช็ค "run เดียวกันใน tk เดียวกัน" ด้วย
+    //    เพื่อกันกรณี lot ถูก rename แต่เป็นใบเดิม ไม่ต้องปริ้นใหม่
+    if (!printed && runNo) {
+      [rows] = await pool.query(
+        `SELECT pl_id, lot_no
+         FROM print_log
+         WHERE tk_id = ?
+           AND status = 1
+           AND lot_no LIKE ?
+         LIMIT 1`,
+        [tk_id, `%-${runNo}`]
+      );
+
+      printed = rows.length > 0;
+    }
+  } catch (e) {
+    console.warn("[print_log check]", e.message);
+  }
+
+  if (printed) {
+    already_printed_lots.push({
+      lot_no:     lot.lot_no,
+      tf_rs_code: lot.tf_rs_code,
+      part_no:    lot.part_no,
+      part_name:  lot.part_name,
+    });
+  } else {
+    toPrint.push(lot);
+  }
+}
 
   if (toPrint.length === 0) {
     return res.json({
