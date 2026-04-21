@@ -426,8 +426,8 @@ async function printBarcode(req, res) {
          t.from_lot_no,
          t.tf_rs_code,
          t.lot_parked_status,
-         fp.part_no            AS part_no,
-         fp.part_name          AS part_name,
+         COALESCE(fp.part_no,   tp.part_no)   AS part_no,
+         COALESCE(fp.part_name, tp.part_name) AS part_name,
          tp.part_no            AS new_part_no,
          tp.part_name          AS new_part_name,
          cp.color_name         AS color_name

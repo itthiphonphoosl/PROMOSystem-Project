@@ -73,7 +73,7 @@ exports.listAllActiveOpScans = async (req, res) => {
          s.tf_rs_code,
          (SELECT d.lot_no FROM ${SAFE_TKDETAIL} d
           WHERE d.tk_id = s.tk_id
-          ORDER BY d.tk_created_at_ts DESC LIMIT 1) AS lot_no,
+          ORDER BY d.tk_created_at_ts ASC LIMIT 1) AS lot_no,
          s.op_sc_ts,
          s.op_sc_finish_ts
        FROM ${SAFE_OPSCAN} s
@@ -120,7 +120,7 @@ exports.getOpScanById = async (req, res) => {
          s.tf_rs_code,
          (SELECT d.lot_no FROM ${SAFE_TKDETAIL} d
           WHERE d.tk_id = s.tk_id
-          ORDER BY d.tk_created_at_ts DESC LIMIT 1) AS lot_no,
+          ORDER BY d.tk_created_at_ts ASC LIMIT 1) AS lot_no,
          s.op_sc_ts,
          s.op_sc_finish_ts
        FROM ${SAFE_OPSCAN} s
@@ -194,7 +194,20 @@ exports.getOpScanById = async (req, res) => {
       [row.tk_id, row.tk_id, row.tk_id, row.tk_id]
     );
 
-    // base lot: first lot created with this TK document (TKRunLog ASC)
+    // base: original TK document info (part_no / part_name / lot_no) from TKDetail
+    // TKDetail ถูกสร้างตอนสร้างเอกสาร → ไม่เปลี่ยนตาม Co-ID ภายหลัง
+    const [tkDetailBaseRows] = await pool.query(
+      `SELECT d.part_id, d.lot_no, p.part_no, p.part_name
+       FROM \`TKDetail\` d
+       LEFT JOIN \`part\` p ON p.part_id = d.part_id
+       WHERE d.tk_id = ?
+       ORDER BY d.tk_created_at_ts ASC
+       LIMIT 1`,
+      [row.tk_id]
+    );
+    const tkDetailBase = tkDetailBaseRows[0] ?? null;
+
+    // run_no: ยังคงดึงจาก TKRunLog (lot แรกของ TK นี้)
     const [baseRows] = await pool.query(
       `SELECT r.run_no, r.lot_no, r.part_id, p.part_no, p.part_name
        FROM \`TKRunLog\` r
@@ -209,11 +222,15 @@ exports.getOpScanById = async (req, res) => {
     return res.json({
       actor,
       item: row,
-      base: baseRow
-        ? { run_no: baseRow.run_no, lot_no: baseRow.lot_no,
-            part_id: baseRow.part_id, part_no: baseRow.part_no,
-            part_name: baseRow.part_name }
-        : null,
+      // part_no / part_name / lot_no → TKDetail (ข้อมูลตอนสร้างเอกสาร ไม่เปลี่ยนตาม Co-ID)
+      // run_no → TKRunLog (lot แรกที่ถูกสร้าง)
+      base: {
+        run_no:    baseRow?.run_no    ?? null,
+        lot_no:    tkDetailBase?.lot_no    ?? baseRow?.lot_no    ?? null,
+        part_id:   tkDetailBase?.part_id   ?? baseRow?.part_id   ?? null,
+        part_no:   tkDetailBase?.part_no   ?? baseRow?.part_no   ?? null,
+        part_name: tkDetailBase?.part_name ?? baseRow?.part_name ?? null,
+      },
       incoming_lots: incomingRows,
       incoming_lot_count: incomingRows.length,
       current_lots: currentRows,
@@ -280,7 +297,7 @@ exports.getActiveOpScanByTkId = async (req, res) => {
          s.tf_rs_code,
          (SELECT d.lot_no FROM ${SAFE_TKDETAIL} d
           WHERE d.tk_id = s.tk_id
-          ORDER BY d.tk_created_at_ts DESC LIMIT 1) AS lot_no,
+          ORDER BY d.tk_created_at_ts ASC LIMIT 1) AS lot_no,
          s.op_sc_ts,
          s.op_sc_finish_ts
        FROM ${SAFE_OPSCAN} s
