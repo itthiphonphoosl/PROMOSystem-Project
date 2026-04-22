@@ -522,37 +522,17 @@ exports.getTkSummary = async (req, res) => {
       ? String(lastFinished.op_sc_id).trim()
       : null;
 
-    let incoming_lots = [];
-    if (last_finished_op_sc_id) {
-      const [inRows] = await pool.query(
-        `SELECT
-           t.to_lot_no         AS lot_no,
-           CAST(latest_s.lot_parked_status AS UNSIGNED) AS lot_parked_status,
-           SUM(t.transfer_qty) AS qty,
-           MAX(t.transfer_ts)  AS last_ts
-         FROM ${SAFE_TRANSFER} t
-         INNER JOIN (
-           SELECT t2.to_lot_no, t2.lot_parked_status
-           FROM ${SAFE_TRANSFER} t2
-           INNER JOIN (
-             SELECT to_lot_no, MAX(transfer_id) AS max_id
-             FROM ${SAFE_TRANSFER}
-             GROUP BY to_lot_no
-           ) mx ON mx.to_lot_no = t2.to_lot_no AND mx.max_id = t2.transfer_id
-         ) latest_s ON latest_s.to_lot_no = t.to_lot_no
-         WHERE t.op_sc_id = ?
-           AND NOT EXISTS (
-             SELECT 1 FROM ${SAFE_TRANSFER} t3
-             WHERE t3.from_lot_no = t.to_lot_no
-               AND t3.to_lot_no   != t.to_lot_no
-               AND (t3.from_tk_id = ? OR t3.to_tk_id = ?)
-           )
-         GROUP BY t.to_lot_no, latest_s.lot_parked_status
-         ORDER BY MAX(t.transfer_ts) DESC`,
-        [last_finished_op_sc_id, tk_id, tk_id]
-      );
-      incoming_lots = inRows || [];
-    }
+    // ✅ FIX: ใช้ getCurrentActiveLotsByTk แทน query เฉพาะ last_finished_op_sc_id
+    // เดิม: query แค่ output ของ scan ล่าสุด → lot ที่ข้ามสถานีหาย (เช่น lot-000051 ที่ STA001 split
+    //        แต่ยังไม่ผ่าน STA003 → ไม่ปรากฏใน incoming_lots ทำให้ operator เลือกไม่ได้)
+    // ใหม่: ดึง active lots ทั้งหมดของ TK นี้ รองรับ self-transfer + partial split ถูกต้อง
+    const allActiveLots = await getCurrentActiveLotsByTk(pool, tk_id);
+    const incoming_lots = allActiveLots.map(l => ({
+      lot_no:            l.lot_no            ?? null,
+      lot_parked_status: l.lot_parked_status ?? 0,
+      qty:               l.qty               ?? null,
+      last_ts:           l.transfer_ts       ?? null,
+    }));
 
     let parked_lots_station_all = [];
     if (current_station) {
@@ -817,16 +797,45 @@ exports.lookupTkByLotNo = async (req, res) => {
   try {
     const pool = getPool();
 
-    const [logRows] = await pool.query(
-      `SELECT tk_id FROM \`TKRunLog\` WHERE lot_no = ? LIMIT 1`,
+    // ① ค้นหาแบบปกติ (exact match)
+    let [logRows] = await pool.query(
+      `SELECT tk_id, lot_no AS matched_lot_no FROM \`TKRunLog\` WHERE lot_no = ? LIMIT 1`,
       [lot_no]
     );
+
+    // ② ถ้าไม่เจอ → ลองค้นหาด้วย run_no + วันที่ (กรณีเปลี่ยน part_no/part_name แล้วปริ้นใบใหม่)
+    // เช่น สแกนใบเก่า "260401-PN001-PartA-000001" แต่ DB มีแค่ "260401-PN002-PartB-000001"
+    // run_no คือ 6 ตัวเลขท้ายสุด, วันที่คือส่วนแรกก่อน dash แรก
+    let isOldLabel = false;
+    if (!logRows[0]) {
+      const firstDash = lot_no.indexOf("-");
+      const lastDash  = lot_no.lastIndexOf("-");
+
+      if (firstDash > 0 && lastDash > firstDash) {
+        const lotDate = lot_no.slice(0, firstDash);      // เช่น "260401"
+        const runNo   = lot_no.slice(lastDash + 1);      // เช่น "000001"
+
+        [logRows] = await pool.query(
+          `SELECT tk_id, lot_no AS matched_lot_no
+           FROM \`TKRunLog\`
+           WHERE run_no = ?
+             AND lot_no LIKE ?
+           LIMIT 1`,
+          [runNo, `${lotDate}-%`]
+        );
+
+        if (logRows[0]) {
+          isOldLabel = true; // เจอด้วย run_no → ใบที่สแกนเป็นใบเก่า (part เปลี่ยนแล้ว)
+        }
+      }
+    }
 
     if (!logRows[0]) {
       return res.status(404).json({ message: "ไม่พบ Lot No. นี้ในระบบ", actor, lot_no });
     }
 
-    const tk_id = String(logRows[0].tk_id).trim();
+    const tk_id          = String(logRows[0].tk_id).trim();
+    const matched_lot_no = String(logRows[0].matched_lot_no).trim(); // lot จริงใน DB
 
     const [[tkHead]] = await pool.query(
       `SELECT tk_id, tk_status, tk_active FROM \`TKHead\` WHERE tk_id = ? LIMIT 1`,
@@ -843,6 +852,7 @@ exports.lookupTkByLotNo = async (req, res) => {
       return res.status(403).json({ message: "เอกสาร Tracking No. นี้ถูก Cancel ไปแล้ว", actor, lot_no, tk_id });
     }
 
+    // ③ เช็ค parked status โดยใช้ matched_lot_no (lot จริงใน DB)
     const [parkedRows] = await pool.query(
       `SELECT CAST(t.lot_parked_status AS UNSIGNED) AS lot_parked_status,
               t.op_sta_id, s.op_sta_name
@@ -851,7 +861,7 @@ exports.lookupTkByLotNo = async (req, res) => {
        WHERE t.to_lot_no = ?
        ORDER BY t.transfer_id DESC
        LIMIT 1`,
-      [lot_no]
+      [matched_lot_no]
     );
 
     const parkedRow = parkedRows[0];
@@ -859,13 +869,60 @@ exports.lookupTkByLotNo = async (req, res) => {
       const parkedSta     = parkedRow.op_sta_id   ?? "-";
       const parkedStaName = parkedRow.op_sta_name ?? "-";
       return res.status(403).json({
-        message: `Lot "${lot_no}" ถูกพักไว้ที่ ${parkedSta} (${parkedStaName}) ยังไม่สามารถเริ่มงานได้`,
+        message: `Lot "${matched_lot_no}" ถูกพักไว้ที่ ${parkedSta} (${parkedStaName}) ยังไม่สามารถเริ่มงานได้`,
         actor,
         lot_no,
+        matched_lot_no,
         tk_id,
         parked: true,
         parked_at_sta: parkedSta,
         parked_at_sta_name: parkedStaName,
+      });
+    }
+
+    // ③.b เช็คว่า lot นี้ถูก consume ไปแล้วหรือไม่
+    // (ถูกใช้เป็น from_lot_no ใน transfer ที่ to_lot_no ต่างออกไป = Split/Co-ID ออกไปแล้ว)
+    // ถ้า consume แล้ว → lot นี้ไม่ใช่ active lot อีกต่อไป → ห้ามเริ่มงาน
+    //
+    // ✅ FIX: เพิ่ม NOT EXISTS ตรวจ self-transfer ที่ยังอยู่
+    // กรณี Split ตัวแรก → lot เดิมยังมี self-transfer (from=to=lot_no, parked_status=0) อยู่
+    // = lot ยังเหลืออยู่ ยังใช้งานได้ ไม่ถือว่า consumed (เหมือน Master-ID)
+    // กรณี Co-ID หรือ Split ที่ consume หมด → ไม่มี self-transfer แล้ว → consumed จริง → block
+    const [consumedRows] = await pool.query(
+      `SELECT transfer_id, to_lot_no AS consumed_into_lot
+       FROM \`t_transfer\`
+       WHERE from_lot_no = ?
+         AND to_lot_no   != ?
+         AND (from_tk_id = ? OR to_tk_id = ?)
+         AND NOT EXISTS (
+           SELECT 1 FROM \`t_transfer\` t3
+           WHERE t3.from_lot_no = ?
+             AND t3.to_lot_no   = ?
+             AND t3.lot_parked_status = 0
+         )
+       LIMIT 1`,
+      [matched_lot_no, matched_lot_no, tk_id, tk_id,
+       matched_lot_no, matched_lot_no]
+    );
+
+    if (consumedRows[0]) {
+      const consumedIntoLot = consumedRows[0].consumed_into_lot ?? null;
+      // ดึง current active lots เพื่อให้ operator รู้ว่าควรสแกน lot ไหนแทน
+      const currentLots = await getCurrentActiveLotsByTk(pool, tk_id);
+      const currentLotNos = currentLots.map(l => l.lot_no).filter(Boolean);
+      return res.status(403).json({
+        message: `Lot "${matched_lot_no}" ถูก Split/Co-ID ออกไปแล้ว ไม่สามารถเริ่มงานได้`,
+        actor,
+        lot_no,
+        matched_lot_no,
+        tk_id,
+        consumed: true,
+        consumed_into_lot: consumedIntoLot,
+        current_lots: currentLots,
+        current_lot_nos: currentLotNos,
+        hint: currentLotNos.length > 0
+          ? `กรุณาสแกน lot ที่ใช้งานได้: ${currentLotNos.join(", ")}`
+          : "ไม่พบ active lot ในเอกสารนี้",
       });
     }
 
@@ -883,6 +940,8 @@ exports.lookupTkByLotNo = async (req, res) => {
       return res.json({
         actor,
         lot_no,
+        matched_lot_no,
+        is_old_label: isOldLabel,
         tk_id,
         tk_status: 1,
         is_finished: true,
@@ -918,7 +977,9 @@ exports.lookupTkByLotNo = async (req, res) => {
 
     return res.json({
       actor,
-      lot_no,
+      lot_no,           // lot_no ที่สแกนมา (อาจเป็นใบเก่า)
+      matched_lot_no,   // lot จริงใน DB (ใหม่หลังเปลี่ยน part)
+      is_old_label: isOldLabel, // true = ใบเก่า part เปลี่ยนแล้ว
       tk_id,
       tk_status: tkHead.tk_status,
       detail: detail ? {

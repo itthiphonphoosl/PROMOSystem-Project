@@ -312,7 +312,9 @@ Write-Output "OK:\$written"
     fs.writeFileSync(ps1File, psScript, { encoding: "utf8" });
     const cmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${ps1File}"`;
 
-    exec(cmd, { timeout: 20000 }, (err, stdout, stderr) => {
+    // FIX 1: เพิ่ม timeout 20s → 45s (label QR ใหญ่ใช้เวลา render+transfer นานกว่า 20s)
+    // timeout สั้นเกินทำให้ Node โยน error ทั้งที่ printer รับ job ไปแล้ว → ปริ้น 2 ใบ
+    exec(cmd, { timeout: 45000 }, (err, stdout, stderr) => {
       try { fs.unlinkSync(prnFile); } catch (_) {}
       try { fs.unlinkSync(ps1File); } catch (_) {}
       if (err) return reject(new Error(stderr?.trim() || err.message));
@@ -426,8 +428,14 @@ async function printBarcode(req, res) {
          t.from_lot_no,
          t.tf_rs_code,
          t.lot_parked_status,
-         COALESCE(fp.part_no,   tp.part_no)   AS part_no,
-         COALESCE(fp.part_name, tp.part_name) AS part_name,
+         -- ✅ Fix: part_no ของ from_lot
+         -- ลำดับ fallback:
+         --  1) fp  = TKRunLog match ตรง (กรณีปกติ)
+         --  2) fp2 = parse part_no จาก string ของ from_lot_no โดยตรง
+         --           เพราะ Master-ID ใช้ run_no เดิมใน to_lot_no → ไม่มีใน TKRunLog
+         --  3) tp  = part ของ to_lot (fallback สุดท้าย)
+         COALESCE(fp.part_no,   fp2.part_no,   tp.part_no)   AS part_no,
+         COALESCE(fp.part_name, fp2.part_name, tp.part_name) AS part_name,
          tp.part_no            AS new_part_no,
          tp.part_name          AS new_part_name,
          cp.color_name         AS color_name
@@ -443,6 +451,12 @@ async function printBarcode(req, res) {
        LEFT JOIN \`part\`           fp  ON fp.part_id  = frl.part_id
        LEFT JOIN \`TKRunLog\`       trl ON trl.lot_no  = t.to_lot_no
        LEFT JOIN \`part\`           tp  ON tp.part_id  = trl.part_id
+       -- ✅ Fix: fallback — match part_no ตรงกับตำแหน่ง 8 ใน from_lot_no (หลัง date prefix 7 chars)
+       --   format: {date(6)}-{part_no}-{part_name}-{run_no(6)}
+       --   ถ้า fp ไม่เจอ → ลอง JOIN part table โดย substring ของ from_lot_no
+       LEFT JOIN \`part\` fp2 ON fp.part_id IS NULL
+         AND SUBSTRING(t.from_lot_no, 8, LENGTH(fp2.part_no)) = fp2.part_no
+         AND SUBSTRING(t.from_lot_no, 8 + LENGTH(fp2.part_no), 1) = '-'
        LEFT JOIN \`color_painting\`  cp  ON cp.color_id = t.color_id
        WHERE ${outerWhere}
        ORDER BY t.transfer_id ASC`,
@@ -514,11 +528,21 @@ for (const lot of allLots) {
   const runNo = extractRunNo(lot.lot_no);
 
   try {
+    // FIX 2: เพิ่ม grace period สำหรับ status=0 (timeout/failed)
+    // ปัญหาเดิม: timeout → catch บันทึก status=0 → check เจอแค่ status=1 → ไม่ block
+    //           → user retry → printer พิมพ์ซ้ำ (double print)
+    // วิธีแก้: ถ้า status=0 และสร้างไม่เกิน 5 นาทีที่แล้ว → ถือว่า "อาจพิมพ์ไปแล้ว" → skip
+    //          ถ้า status=0 เก่ากว่า 5 นาที → printer ไม่รับ job จริงๆ → อนุญาตให้ reprint
+
     // 1) เช็ค lot_no ตรงตัวก่อน
     let [rows] = await pool.query(
-      `SELECT pl_id
+      `SELECT pl_id, status
        FROM print_log
-       WHERE lot_no = ? AND status = 1
+       WHERE lot_no = ?
+         AND (
+           status = 1
+           OR (status = 0 AND created_at > NOW() - INTERVAL 5 MINUTE)
+         )
        LIMIT 1`,
       [lot.lot_no]
     );
@@ -529,11 +553,14 @@ for (const lot of allLots) {
     //    เพื่อกันกรณี lot ถูก rename แต่เป็นใบเดิม ไม่ต้องปริ้นใหม่
     if (!printed && runNo) {
       [rows] = await pool.query(
-        `SELECT pl_id, lot_no
+        `SELECT pl_id, lot_no, status
          FROM print_log
          WHERE tk_id = ?
-           AND status = 1
            AND lot_no LIKE ?
+           AND (
+             status = 1
+             OR (status = 0 AND created_at > NOW() - INTERVAL 5 MINUTE)
+           )
          LIMIT 1`,
         [tk_id, `%-${runNo}`]
       );
