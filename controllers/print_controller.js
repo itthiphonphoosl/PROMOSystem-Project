@@ -15,10 +15,6 @@ const { getPool } = require("../config/db");
 const PRINTER_NAME = process.env.PRINTER_NAME;
 const PRINTER_IP   = process.env.PRINTER_IP || null;
 
-function extractRunNo(lotNo) {
-  const m = String(lotNo || "").trim().match(/-(\d+)$/);
-  return m ? m[1] : null;
-}
 // ════════════════════════════════════════════════════════════════
 // buildLotLabel  —  สร้าง TSPL 1 label ตาม layout ในรูป
 //
@@ -275,11 +271,7 @@ public class RawPrint {
     [DllImport("winspool.drv", SetLastError=true)]
     public static extern bool StartDocPrinter(IntPtr h, int lvl, [In][MarshalAs(UnmanagedType.LPStruct)] DOCINFOA di);
     [DllImport("winspool.drv", SetLastError=true)]
-    public static extern bool StartPagePrinter(IntPtr h);
-    [DllImport("winspool.drv", SetLastError=true)]
     public static extern bool WritePrinter(IntPtr h, IntPtr p, int c, out int w);
-    [DllImport("winspool.drv", SetLastError=true)]
-    public static extern bool EndPagePrinter(IntPtr h);
     [DllImport("winspool.drv", SetLastError=true)]
     public static extern bool EndDocPrinter(IntPtr h);
     [DllImport("winspool.drv", SetLastError=true)]
@@ -297,24 +289,20 @@ if (\$hPrinter -eq [IntPtr]::Zero) { throw "Cannot open printer: \$prn" }
 \$di.pDocName  = "NodeRawPrint"
 \$di.pDataType = "RAW"
 [RawPrint]::StartDocPrinter(\$hPrinter, 1, \$di)    | Out-Null
-[RawPrint]::StartPagePrinter(\$hPrinter)            | Out-Null
 \$ptr     = [System.Runtime.InteropServices.Marshal]::AllocHGlobal(\$bytes.Length)
 \$written = 0
 [System.Runtime.InteropServices.Marshal]::Copy(\$bytes, 0, \$ptr, \$bytes.Length)
 [RawPrint]::WritePrinter(\$hPrinter, \$ptr, \$bytes.Length, [ref]\$written) | Out-Null
 [System.Runtime.InteropServices.Marshal]::FreeHGlobal(\$ptr)
-[RawPrint]::EndPagePrinter(\$hPrinter) | Out-Null
 [RawPrint]::EndDocPrinter(\$hPrinter)  | Out-Null
 [RawPrint]::ClosePrinter(\$hPrinter)   | Out-Null
 Write-Output "OK:\$written"
 `;
 
     fs.writeFileSync(ps1File, psScript, { encoding: "utf8" });
-    const cmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${ps1File}"`;
+    const cmd = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${ps1File}"`;
 
-    // FIX 1: เพิ่ม timeout 20s → 45s (label QR ใหญ่ใช้เวลา render+transfer นานกว่า 20s)
-    // timeout สั้นเกินทำให้ Node โยน error ทั้งที่ printer รับ job ไปแล้ว → ปริ้น 2 ใบ
-    exec(cmd, { timeout: 45000 }, (err, stdout, stderr) => {
+    exec(cmd, { timeout: 35000 }, (err, stdout, stderr) => {
       try { fs.unlinkSync(prnFile); } catch (_) {}
       try { fs.unlinkSync(ps1File); } catch (_) {}
       if (err) return reject(new Error(stderr?.trim() || err.message));
@@ -428,14 +416,8 @@ async function printBarcode(req, res) {
          t.from_lot_no,
          t.tf_rs_code,
          t.lot_parked_status,
-         -- ✅ Fix: part_no ของ from_lot
-         -- ลำดับ fallback:
-         --  1) fp  = TKRunLog match ตรง (กรณีปกติ)
-         --  2) fp2 = parse part_no จาก string ของ from_lot_no โดยตรง
-         --           เพราะ Master-ID ใช้ run_no เดิมใน to_lot_no → ไม่มีใน TKRunLog
-         --  3) tp  = part ของ to_lot (fallback สุดท้าย)
-         COALESCE(fp.part_no,   fp2.part_no,   tp.part_no)   AS part_no,
-         COALESCE(fp.part_name, fp2.part_name, tp.part_name) AS part_name,
+         fp.part_no            AS part_no,
+         fp.part_name          AS part_name,
          tp.part_no            AS new_part_no,
          tp.part_name          AS new_part_name,
          cp.color_name         AS color_name
@@ -451,18 +433,47 @@ async function printBarcode(req, res) {
        LEFT JOIN \`part\`           fp  ON fp.part_id  = frl.part_id
        LEFT JOIN \`TKRunLog\`       trl ON trl.lot_no  = t.to_lot_no
        LEFT JOIN \`part\`           tp  ON tp.part_id  = trl.part_id
-       -- ✅ Fix: fallback — match part_no ตรงกับตำแหน่ง 8 ใน from_lot_no (หลัง date prefix 7 chars)
-       --   format: {date(6)}-{part_no}-{part_name}-{run_no(6)}
-       --   ถ้า fp ไม่เจอ → ลอง JOIN part table โดย substring ของ from_lot_no
-       LEFT JOIN \`part\` fp2 ON fp.part_id IS NULL
-         AND SUBSTRING(t.from_lot_no, 8, LENGTH(fp2.part_no)) = fp2.part_no
-         AND SUBSTRING(t.from_lot_no, 8 + LENGTH(fp2.part_no), 1) = '-'
        LEFT JOIN \`color_painting\`  cp  ON cp.color_id = t.color_id
        WHERE ${outerWhere}
        ORDER BY t.transfer_id ASC`,
       [...staParam, ...subParams, ...(filterByLot ? [single_lot_no] : [])]
     );
     transferLots = rows;
+
+    // ✅ FIX: กรอง lot ที่ไม่ต้องปริ้นใหม่
+    // กฎ: ถ้า from_lot_no และ to_lot_no มี run_no (เลข 6 หลักท้าย) เดียวกัน
+    //     แปลว่า lot ถูกเปลี่ยนชื่อ part เฉยๆ (label เดิมยังสแกนได้ผ่าน lookupTkByLotNo)
+    //     → ไม่ต้องปริ้นใหม่
+    //
+    // เกิดกับ:
+    //   tf=1 Master-ID: เปลี่ยน part_no/part_name แต่ run_no เดิม (rebuildMasterLotNo)
+    //   tf=2 Split-ID ตัวแรก: rename source lot run_no เดิม (si === 0)
+    //
+    // ไม่กระทบ:
+    //   tf=2 Split-ID ตัวถัดไป: genNewLot → run_no ใหม่เสมอ → ยังปริ้น
+    //   tf=3 Co-ID: genNewLot → run_no ใหม่เสมอ → ยังปริ้น
+    if (!filterByLot && !isReprint) {
+      // Lot format: YYMMDD-partno-partname-RRRRRR
+      // ต้องตรวจทั้ง date prefix (segment แรก) AND run_no (segment สุดท้าย)
+      // เหตุผล: run_no อาจซ้ำข้าม TK / ข้ามวันได้ (เช่น 260401-...-000001 กับ 260422-...-000001)
+      //         ต้องใช้ทั้งคู่ถึงจะมั่นใจว่าเป็น lot เดิมที่แค่เปลี่ยนชื่อ part
+      const getDatePrefix = (lot_no) => String(lot_no || "").split("-")[0];
+      const getRunNo      = (lot_no) => String(lot_no || "").split("-").pop();
+      transferLots = transferLots.filter((lot) => {
+        if (lot.tf_rs_code === 1 || lot.tf_rs_code === 2) {
+          const fromDate = getDatePrefix(lot.from_lot_no);
+          const toDate   = getDatePrefix(lot.lot_no);
+          const fromRun  = getRunNo(lot.from_lot_no);
+          const toRun    = getRunNo(lot.lot_no);
+          if (fromDate && toDate && fromDate === toDate &&
+              fromRun  && toRun  && fromRun  === toRun) {
+            console.log(`[print] skip same date+run_no (${lot.tf_rs_code === 1 ? "Master" : "Split"}-ID): ${lot.lot_no}`);
+            return false;
+          }
+        }
+        return true;
+      });
+    }
   } catch (e) {
     return res.status(500).json({ ok: false, message: "DB error (t_transfer): " + e.message });
   }
@@ -515,73 +526,36 @@ async function printBarcode(req, res) {
   }
 
   // ── 4) กรอง lot ที่ยังไม่เคยปริ้น (ถ้า reprint=true → ปริ้นทุก lot) ─
-const toPrint = [];
-const already_printed_lots = [];
+  const toPrint = [];
+  const already_printed_lots = [];
 
-for (const lot of allLots) {
-  if (isReprint) {
-    toPrint.push(lot);
-    continue;
-  }
-
-  let printed = false;
-  const runNo = extractRunNo(lot.lot_no);
-
-  try {
-    // FIX 2: เพิ่ม grace period สำหรับ status=0 (timeout/failed)
-    // ปัญหาเดิม: timeout → catch บันทึก status=0 → check เจอแค่ status=1 → ไม่ block
-    //           → user retry → printer พิมพ์ซ้ำ (double print)
-    // วิธีแก้: ถ้า status=0 และสร้างไม่เกิน 5 นาทีที่แล้ว → ถือว่า "อาจพิมพ์ไปแล้ว" → skip
-    //          ถ้า status=0 เก่ากว่า 5 นาที → printer ไม่รับ job จริงๆ → อนุญาตให้ reprint
-
-    // 1) เช็ค lot_no ตรงตัวก่อน
-    let [rows] = await pool.query(
-      `SELECT pl_id, status
-       FROM print_log
-       WHERE lot_no = ?
-         AND (
-           status = 1
-           OR (status = 0 AND created_at > NOW() - INTERVAL 5 MINUTE)
-         )
-       LIMIT 1`,
-      [lot.lot_no]
-    );
-
-    printed = rows.length > 0;
-
-    // 2) ถ้ายังไม่เจอ ให้เช็ค "run เดียวกันใน tk เดียวกัน" ด้วย
-    //    เพื่อกันกรณี lot ถูก rename แต่เป็นใบเดิม ไม่ต้องปริ้นใหม่
-    if (!printed && runNo) {
-      [rows] = await pool.query(
-        `SELECT pl_id, lot_no, status
-         FROM print_log
-         WHERE tk_id = ?
-           AND lot_no LIKE ?
-           AND (
-             status = 1
-             OR (status = 0 AND created_at > NOW() - INTERVAL 5 MINUTE)
-           )
-         LIMIT 1`,
-        [tk_id, `%-${runNo}`]
-      );
-
-      printed = rows.length > 0;
+  for (const lot of allLots) {
+    if (isReprint) {
+      toPrint.push(lot);
+      continue;
     }
-  } catch (e) {
-    console.warn("[print_log check]", e.message);
-  }
+    let printed = false;
+    try {
+      const [rows] = await pool.query(
+        `SELECT pl_id FROM print_log WHERE lot_no = ? AND status = 1 LIMIT 1`,
+        [lot.lot_no]
+      );
+      printed = rows.length > 0;
+    } catch (e) {
+      console.warn("[print_log check]", e.message);
+    }
 
-  if (printed) {
-    already_printed_lots.push({
-      lot_no:     lot.lot_no,
-      tf_rs_code: lot.tf_rs_code,
-      part_no:    lot.part_no,
-      part_name:  lot.part_name,
-    });
-  } else {
-    toPrint.push(lot);
+    if (printed) {
+      already_printed_lots.push({
+        lot_no:     lot.lot_no,
+        tf_rs_code: lot.tf_rs_code,
+        part_no:    lot.part_no,
+        part_name:  lot.part_name,
+      });
+    } else {
+      toPrint.push(lot);
+    }
   }
-}
 
   if (toPrint.length === 0) {
     return res.json({

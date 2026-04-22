@@ -157,7 +157,19 @@ exports.getOpScanById = async (req, res) => {
          t.to_lot_no AS lot_no,
          t.from_lot_no,
          t.tf_rs_code,
-         t.transfer_qty AS qty,
+         -- ✅ FIX: SUM qty ทุก row ที่ to_lot_no เดียวกัน
+         --    รองรับ Co-ID ที่มีหลาย from_lot รวมเข้า to_lot เดียว (เช่น 5×200 → 1000)
+         --    Master-ID / Split-ID ไม่กระทบ เพราะมี row เดียวต่อ to_lot_no อยู่แล้ว
+         (CASE
+           WHEN t.from_lot_no = t.to_lot_no
+           THEN t.transfer_qty
+           ELSE (SELECT SUM(t_sum.transfer_qty)
+                 FROM ${SAFE_TRANSFER} t_sum
+                 WHERE t_sum.to_lot_no         = t.to_lot_no
+                   AND t_sum.to_tk_id          = ?
+                   AND t_sum.lot_parked_status = 0
+                   AND t_sum.from_lot_no      != t_sum.to_lot_no)
+         END) AS qty,
          CAST(t.lot_parked_status AS UNSIGNED) AS lot_parked_status,
          t.color_id,
          cp.color_no,
@@ -191,7 +203,7 @@ exports.getOpScanById = async (req, res) => {
              )
          )
        ORDER BY t.transfer_id ASC`,
-      [row.tk_id, row.tk_id, row.tk_id, row.tk_id]
+      [row.tk_id, row.tk_id, row.tk_id, row.tk_id, row.tk_id]
     );
 
     // base: original TK document info (part_no / part_name / lot_no) from TKDetail
@@ -719,7 +731,19 @@ async function getCurrentActiveLotsByTk(pool, tk_id) {
        x.to_lot_no AS lot_no,
        x.from_lot_no,
        x.tf_rs_code,
-       x.transfer_qty AS qty,
+       -- ✅ FIX: SUM qty ทุก row ที่ to_lot_no เดียวกัน
+       --    รองรับ Co-ID ที่มีหลาย from_lot รวมเข้า to_lot เดียว (เช่น 5×200 → 1000)
+       --    Master-ID / Split-ID ไม่กระทบ เพราะมี row เดียวต่อ to_lot_no อยู่แล้ว
+       (CASE
+         WHEN x.from_lot_no = x.to_lot_no
+         THEN x.transfer_qty
+         ELSE (SELECT SUM(t_sum.transfer_qty)
+               FROM ${SAFE_TRANSFER} t_sum
+               WHERE t_sum.to_lot_no         = x.to_lot_no
+                 AND t_sum.to_tk_id          = ?
+                 AND t_sum.lot_parked_status = 0
+                 AND t_sum.from_lot_no      != t_sum.to_lot_no)
+       END) AS qty,
        CAST(x.lot_parked_status AS UNSIGNED) AS lot_parked_status,
        x.op_sta_id,
        x.op_sc_id,
@@ -749,7 +773,7 @@ async function getCurrentActiveLotsByTk(pool, tk_id) {
            )
        )
      ORDER BY x.transfer_id ASC`,
-    [tk_id, tk_id, tk_id, tk_id]
+    [tk_id, tk_id, tk_id, tk_id, tk_id]
   );
 
   if (!rows.length) {
