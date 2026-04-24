@@ -440,6 +440,8 @@ exports.getTkSummary = async (req, res) => {
     );
 
     // 4) transfer history
+    // ✅ เพิ่ม part_id / part_no / part_name โดย JOIN TKRunLog (to_lot_no) → part
+    // ใช้ LEFT JOIN ไม่กระทบ logic เดิม ถ้าหา lot ไม่เจอ field จะเป็น null
     const [transferRows] = await pool.query(
       `SELECT
          t.transfer_id, t.from_tk_id, t.to_tk_id,
@@ -452,7 +454,8 @@ exports.getTkSummary = async (req, res) => {
          t.color_id, cp.color_no, cp.color_name,
          t.created_by_u_id, u.u_firstname AS created_by_u_firstname, u.u_lastname AS created_by_u_lastname,
          t.transfer_ts,
-         rl_from.tk_id AS from_lot_original_tk
+         rl_from.tk_id AS from_lot_original_tk,
+         p.part_id, p.part_no, p.part_name
        FROM ${SAFE_TRANSFER} t
        LEFT JOIN \`transfer_reason\` tr ON tr.tf_rs_code = t.tf_rs_code
        LEFT JOIN \`op_station\`      s  ON s.op_sta_id   = t.op_sta_id
@@ -460,6 +463,12 @@ exports.getTkSummary = async (req, res) => {
        LEFT JOIN \`user\`            u  ON u.u_id        = t.created_by_u_id
        LEFT JOIN \`color_painting\`  cp ON cp.color_id   = t.color_id
        LEFT JOIN \`TKRunLog\`        rl_from ON rl_from.lot_no = t.from_lot_no
+       LEFT JOIN \`part\`            p ON CONCAT(TRIM(p.part_no), '-', TRIM(p.part_name)) =
+         SUBSTRING(
+           t.to_lot_no,
+           INSTR(t.to_lot_no, '-') + 1,
+           LENGTH(t.to_lot_no) - INSTR(t.to_lot_no, '-') - LENGTH(SUBSTRING_INDEX(t.to_lot_no, '-', -1)) - 1
+         )
        WHERE t.from_tk_id = ? OR t.to_tk_id = ?
        ORDER BY t.transfer_ts ASC`,
       [tk_id, tk_id]

@@ -388,11 +388,7 @@ async function printBarcode(req, res) {
     }
   }
 
-  // ── 2) ดึง lots จาก t_transfer ───────────────────────────
-  //   op_sta_id → JOIN op_scan เพื่อกรองเฉพาะ lot ที่ gen จาก station นั้น
-  //   op_sc_id  → เฉพาะ scan นั้น (HH)
-  //   lot_no    → lot เดี่ยว
-  //   (ไม่มี)   → ทุก lot ใหม่ของ TK
+  
   let transferLots = [];
   try {
     let subWhere = "WHERE to_tk_id = ?";
@@ -416,8 +412,8 @@ async function printBarcode(req, res) {
          t.from_lot_no,
          t.tf_rs_code,
          t.lot_parked_status,
-         fp.part_no            AS part_no,
-         fp.part_name          AS part_name,
+         COALESCE(fp.part_no,   fp_fb.part_no)   AS part_no,
+         COALESCE(fp.part_name, fp_fb.part_name) AS part_name,
          tp.part_no            AS new_part_no,
          tp.part_name          AS new_part_name,
          cp.color_name         AS color_name
@@ -434,6 +430,11 @@ async function printBarcode(req, res) {
        LEFT JOIN \`TKRunLog\`       trl ON trl.lot_no  = t.to_lot_no
        LEFT JOIN \`part\`           tp  ON tp.part_id  = trl.part_id
        LEFT JOIN \`color_painting\`  cp  ON cp.color_id = t.color_id
+       LEFT JOIN \`TKRunLog\`       frl_fb ON frl.lot_no IS NULL
+                                           AND frl_fb.tk_id = t.from_tk_id
+                                           AND SUBSTRING_INDEX(frl_fb.lot_no, '-', -1)
+                                             = SUBSTRING_INDEX(t.from_lot_no, '-', -1)
+       LEFT JOIN \`part\`           fp_fb ON fp_fb.part_id = frl_fb.part_id
        WHERE ${outerWhere}
        ORDER BY t.transfer_id ASC`,
       [...staParam, ...subParams, ...(filterByLot ? [single_lot_no] : [])]
@@ -481,13 +482,27 @@ async function printBarcode(req, res) {
   // ── 3) ถ้าไม่มี transfer เลย → เอกสารพึ่งสร้าง ──────────
   //       ดึง base lot จาก TKRunLog + part  tf_rs_code=0
   //       ⚠️ ถ้าส่ง lot_no มา → ไม่ fallback เพราะ lot ไม่ตรง tk_id = error ทันที
+  //       ⚠️ ถ้าส่ง op_sc_id หรือ op_sta_id มา → ไม่ fallback (Master-ID scan ที่ from=to)
   let allLots = transferLots;
   if (allLots.length === 0) {
-    // ถ้าส่ง lot_no มาแต่หาไม่เจอใน tk_id นี้ → reject ทันที ไม่ fallback
     if (filterByLot) {
       return res.status(404).json({
         ok: false,
         message: `ไม่พบ lot_no="${single_lot_no}" ใน tk_id=${tk_id} — กรุณาตรวจสอบ tk_id ให้ถูกต้อง`,
+      });
+    }
+    if (filterByScan || filterBySta) {
+      return res.json({
+        ok:      true,
+        message: filterByScan
+          ? `scan ${op_sc_id} ไม่มี lot ใหม่ที่ต้องปริ้น (lot เดิมยังใช้ได้)`
+          : `station ${op_sta_id} ไม่มี lot ใหม่ที่ต้องปริ้น (lot เดิมยังใช้ได้)`,
+        tk_id,
+        total_lots:  0,
+        printed:     0,
+        skipped:     0,
+        printed_lots: [],
+        already_printed_lots: [],
       });
     }
     try {
