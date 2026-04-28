@@ -98,7 +98,6 @@ function buildLotLabel(lot, now) {
   const dataX   = qrLeft + quiet * cell;
   const dataY   = qrTop  + quiet * cell;
 
-  // ── Layout ─────────────────────────────────────────────────
   const R_EDGE = 472;             // right content boundary (leave ~4mm margin from paper edge)
   const divX  = Math.min(qrLeft + qrTotal + 2, 165);  // cap left panel ≤165 so right panel ≥325
   const infoX = divX + 6;
@@ -117,16 +116,10 @@ function buildLotLabel(lot, now) {
   const dateStr = `${dd}/${mo}/${yyyy}`;
   const timeStr = `${hh}:${mi}:${ss}`;
 
-  // ── Checkbox ───────────────────────────────────────────────
   const cbY = 224, cbSize = 18, cbTextY = cbY + 3;
   const mX = 16, sX = 168, cX = 316;
 
-  // ── Row Y: pitch 28 label→label ─────────────────────────────
-  // label y, value y+12, separator y+24 → next label y+28
-  // 5 rows: 50,78,106,134,162 → last value=174 (fits <228)
-  // 4 rows: 50,82,114,146     → last value=158 (fits <228)
-  // 3 rows: 50,86,122         → last value=134
-  // 2 rows: 50,92             → last value=104
+  
   const R = (showNew && showColor)
     ? { pnL:50,  pnV:62,  pnS:74,
         nmL:78,  nmV:90,  nmS:102,
@@ -313,17 +306,7 @@ Write-Output "OK:\$written"
   });
 }
 
-// ════════════════════════════════════════════════════════════════
-// POST /api/print/barcode
-//
-// Body (เลือกใช้ตาม use case):
-//   { tk_id }                          → ปริ้นทุก lot ใหม่ของ TK
-//   { tk_id, op_sc_id }                → ปริ้นเฉพาะ scan นั้น (HH)
-//   { tk_id, op_sta_id }               → ปริ้นเฉพาะ lot ที่ gen จาก station นั้น (React reprint)
-//   { tk_id, lot_no }                  → ปริ้น lot เดี่ยว (ปุ่ม Print per row)
-//   { tk_id, reprint: true }           → ปริ้นซ้ำทุก lot
-//   { tk_id, op_sta_id, reprint:true } → ปริ้นซ้ำเฉพาะ station นั้น
-// ════════════════════════════════════════════════════════════════
+
 async function printBarcode(req, res) {
   const { tk_id, op_sc_id, op_sta_id, lot_no: single_lot_no, reprint } = req.body;
   const isReprint    = reprint === true || reprint === "true";
