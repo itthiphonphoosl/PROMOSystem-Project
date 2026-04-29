@@ -148,6 +148,7 @@ function buildLotLabel(lot, now) {
     `REFERENCE 0,0`,
     `SPEED 3`,
     `DENSITY 6`,
+    `CODEPAGE UTF-8`,
     `CLS`,
     `BOX 4,4,476,272,2`,
 
@@ -241,7 +242,7 @@ function sendToPrinter(tsplContent, printerName) {
     const prnFile = path.join(tmpDir, `prn_${ts}.prn`);
     const ps1File = path.join(tmpDir, `prn_${ts}.ps1`);
 
-    fs.writeFileSync(prnFile, tsplContent, "binary");
+    fs.writeFileSync(prnFile, Buffer.from(tsplContent, "utf8"));
 
     const prnEsc = prnFile.replace(/\\/g, "\\\\");
     const prtEsc = printerName.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -395,8 +396,22 @@ async function printBarcode(req, res) {
          t.from_lot_no,
          t.tf_rs_code,
          t.lot_parked_status,
-         COALESCE(fp.part_no,   fp_fb.part_no)   AS part_no,
-         COALESCE(fp.part_name, fp_fb.part_name) AS part_name,
+         -- ถ้า from_lot_no อยู่ใน TKRunLog → ใช้ part จาก TKRunLog
+         -- ถ้าไม่อยู่ (เช่น lot ถูกเปลี่ยน part_no ด้วย Master-ID แล้วไม่มีใน TKRunLog)
+         -- → parse part_no จากชื่อ lot_no โดยตรง (format: YYMMDD-{part_no}-{part_name}-RRRRRR)
+         -- ใช้ LIMIT 1 + ORDER BY LENGTH DESC เพื่อ match part_no ที่ยาวที่สุดก่อน (specific สุด)
+         COALESCE(
+           fp.part_no,
+           (SELECT p2.part_no FROM \`part\` p2
+            WHERE SUBSTRING(t.from_lot_no, 8) LIKE CONCAT(p2.part_no, '-%')
+            ORDER BY LENGTH(p2.part_no) DESC LIMIT 1)
+         ) AS part_no,
+         COALESCE(
+           fp.part_name,
+           (SELECT p2.part_name FROM \`part\` p2
+            WHERE SUBSTRING(t.from_lot_no, 8) LIKE CONCAT(p2.part_no, '-%')
+            ORDER BY LENGTH(p2.part_no) DESC LIMIT 1)
+         ) AS part_name,
          tp.part_no            AS new_part_no,
          tp.part_name          AS new_part_name,
          cp.color_name         AS color_name
@@ -413,11 +428,6 @@ async function printBarcode(req, res) {
        LEFT JOIN \`TKRunLog\`       trl ON trl.lot_no  = t.to_lot_no
        LEFT JOIN \`part\`           tp  ON tp.part_id  = trl.part_id
        LEFT JOIN \`color_painting\`  cp  ON cp.color_id = t.color_id
-       LEFT JOIN \`TKRunLog\`       frl_fb ON frl.lot_no IS NULL
-                                           AND frl_fb.tk_id = t.from_tk_id
-                                           AND SUBSTRING_INDEX(frl_fb.lot_no, '-', -1)
-                                             = SUBSTRING_INDEX(t.from_lot_no, '-', -1)
-       LEFT JOIN \`part\`           fp_fb ON fp_fb.part_id = frl_fb.part_id
        WHERE ${outerWhere}
        ORDER BY t.transfer_id ASC`,
       [...staParam, ...subParams, ...(filterByLot ? [single_lot_no] : [])]

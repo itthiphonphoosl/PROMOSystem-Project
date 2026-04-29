@@ -117,4 +117,24 @@ async function updateStation(req, res) {
   }
 }
 
-module.exports = { listStations, getStationById, updateStation };
+// GET /api/stations/public  — ไม่ต้อง auth (ใช้สำหรับ login dropdown)
+async function listPublicStations(req, res) {
+  try {
+    const pool = getPool();
+    if (!pool) return res.status(500).json({ message: "Database connection failed" });
+
+    const [rows] = await pool.query(
+      `SELECT op_sta_id, op_sta_name
+       FROM op_station
+       WHERE op_sta_active = 1
+       ORDER BY op_sta_id ASC`
+    );
+
+    return res.json({ stations: rows });
+  } catch (err) {
+    console.error("LIST PUBLIC STATIONS ERROR:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+}
+
+module.exports = { listStations, getStationById, updateStation, listPublicStations };
