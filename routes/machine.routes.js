@@ -1,4 +1,3 @@
-// routes/machine.routes.js
 const express = require("express");
 const router = express.Router();
 
@@ -16,9 +15,6 @@ const {
   listMachinesMyStation,
 } = require("../controllers/machine.controller");
 
-// ✅ ต้องวาง /machines/in-station ก่อน /machines/:id
-// เพราะ Express match route ตามลำดับจากบนลงล่าง
-// ถ้า :id อยู่ก่อน Express จะคิดว่า "in-station" คือ id แล้วเข้า admin route แทน
 
 router.get(
   "/machines/in-station",

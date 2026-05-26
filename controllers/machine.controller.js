@@ -1,4 +1,3 @@
-// controllers/machine.controller.js
 const { getPool } = require("../config/db");
 
 function isValidMachineId(id) {
@@ -74,7 +73,6 @@ async function listMachinesMyStation(req, res) {
   }
 }
 
-// GET /api/machines
 async function listMachines(req, res) {
   try {
     const pool = getPool();
@@ -95,7 +93,6 @@ async function listMachines(req, res) {
   }
 }
 
-// GET /api/machines/:id
 async function getMachineById(req, res) {
   const id = String(req.params.id || "").trim();
   if (!isValidMachineId(id)) return res.status(400).json({ message: "Invalid machine id" });
@@ -124,9 +121,8 @@ async function getMachineById(req, res) {
   }
 }
 
-// POST /api/machines
 async function createMachine(req, res) {
-  const mc_name  = String(req.body.mc_name || "").trim();
+  const mc_name   = String(req.body.mc_name || "").trim();
   const rawActive = req.body.mc_active;
   const mc_active = rawActive === undefined ? 1 : rawActive === true ? 1 : rawActive === false ? 0 : Number(rawActive);
 
@@ -193,7 +189,6 @@ async function createMachine(req, res) {
   }
 }
 
-// PUT /api/machines/:id
 async function updateMachine(req, res) {
   const mc_id = String(req.params.id || "").trim();
   if (!/^MC\d{3,}$/i.test(mc_id)) return res.status(400).json({ message: "Invalid machine id" });

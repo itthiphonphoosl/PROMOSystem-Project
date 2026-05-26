@@ -3,7 +3,6 @@ const crypto = require("crypto");
 
 const { getPool } = require("../config/db");
 
-// map u_type -> role (no Utils folder)
 function mapUserTypeToRole(u_type) {
   if (u_type === "op") return "operator";
   if (u_type === "ad") return "admin";
@@ -11,7 +10,6 @@ function mapUserTypeToRole(u_type) {
   return "unknown";
 }
 
-// convert "10s" / "30m" / "24h" / "7d" -> milliseconds
 function durationToMs(text) {
   const s = String(text || "24h").trim().toLowerCase();
   const m = s.match(/^(\d+)\s*([smhd])$/);
@@ -33,7 +31,6 @@ function normalizeClientType(raw) {
 }
 
 async function login(req, res) {
-  // รองรับทั้ง username (React/PC) และ u_username (Flutter/HH)
   const username  = String(req.body.username  || req.body.u_username || "").trim();
   const password  = String(req.body.password  || req.body.u_password || "").trim();
   const op_sta_id = String(req.body.op_sta_id || "").trim();
@@ -49,7 +46,6 @@ async function login(req, res) {
     const pool = getPool();
     if (!pool) return res.status(500).json({ message: "เชื่อมต่อฐานข้อมูลไม่สำเร็จ" });
 
-    // 1) find user
     const [userRows] = await pool.query(
       `SELECT u_id, u_username, u_password, u_type, u_active, u_firstname, u_lastname
        FROM \`user\`
@@ -64,10 +60,8 @@ async function login(req, res) {
 
     const role = mapUserTypeToRole(user.u_type);
 
-    // 2) Decide login mode
     const isOperatorHH = safeClientType === "HH" && user.u_type === "op";
 
-    // 3) Validate credentials
     if (!isOperatorHH) {
       if (!password) return res.status(400).json({ message: "กรุณากรอก password" });
 
@@ -85,7 +79,6 @@ async function login(req, res) {
       if (!op_sta_id) return res.status(400).json({ message: "กรุณาเลือก station (op_sta_id)" });
     }
 
-    // 4) If operator/HH -> lookup station name + active
     let op_sta_name = null;
 
     if (isOperatorHH) {
@@ -104,7 +97,6 @@ async function login(req, res) {
       op_sta_name = sta.op_sta_name || null;
     }
 
-    // 5) Token
     const now = new Date();
     const expiresAt = new Date(now);
     expiresAt.setHours(24, 0, 0, 0);
@@ -152,7 +144,6 @@ async function login(req, res) {
         return res.status(500).json({ message: "ระบบสร้าง token ซ้ำ กรุณาลองใหม่อีกครั้ง" });
       }
 
-      // ✅ store a_op_sta_id (NULL for non-operator or non-HH)
       await conn.query(
         `INSERT INTO \`access\` (a_id, u_id, a_token, a_created, a_expired, a_client_type, a_op_sta_id)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -171,7 +162,6 @@ async function login(req, res) {
       `[LOGIN] u_id=${user.u_id} u_name=${user.u_firstname} ${user.u_lastname} u_username=${user.u_username} clientType=${safeClientType} tokenId=${tokenId} expiresAt=${expiresAt.toISOString()} op_sta_id=${isOperatorHH ? op_sta_id : "-"}`
     );
 
-    // ✅ response: add op_sta_name
     return res.json({
       tokenAccess,
       clientType:     safeClientType,
@@ -193,7 +183,6 @@ async function login(req, res) {
   }
 }
 
-// POST /api/auth/logout
 async function logout(req, res) {
   const auth  = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
@@ -237,19 +226,16 @@ async function createUser(req, res) {
   const u_type    = String(req.body.u_type    || "").trim();
   const active    = req.body.active === undefined ? 1 : Number(req.body.active);
 
-  // validate u_type ก่อน เพราะ logic password ขึ้นกับ u_type
   if (!["op", "ad", "ma"].includes(u_type)) {
     return res.status(400).json({ message: "u_type ต้องเป็น op, ad, ma เท่านั้น" });
   }
 
   const isOperator = u_type === "op";
 
-  // op → ห้ามส่ง password มาเด็ดขาด
   if (isOperator && req.body.password !== undefined) {
     return res.status(400).json({ message: "Operator ไม่รองรับการตั้ง password" });
   }
 
-  // ad / ma → บังคับ password
   const password = !isOperator ? String(req.body.password || "").trim() : null;
   if (!isOperator && !password) {
     return res.status(400).json({ message: "กรุณากรอก password" });
@@ -272,7 +258,6 @@ async function createUser(req, res) {
       return res.status(409).json({ message: "username นี้มีอยู่แล้ว" });
     }
 
-    // ad/ma → hash password, op → '' (empty string เพราะ u_password เป็น NOT NULL)
     const storedPassword = isOperator ? "" : await bcrypt.hash(password, 10);
     const now = new Date();
 
@@ -280,7 +265,6 @@ async function createUser(req, res) {
     await conn.beginTransaction();
 
     try {
-      // AUTO_INCREMENT -- MySQL generates u_id automatically
       await conn.query(
         `INSERT INTO \`user\` (u_username, u_password, u_firstname, u_lastname, u_type, u_active, u_created_ts, u_updated_ts)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -316,24 +300,17 @@ async function createUser(req, res) {
   }
 }
 
-// ✅ [แก้ไข] getAllUsers: รองรับ query alias
-// - type   -> u_type   (op/ad/ma)
-// - active -> u_active (0/1)
-// และยังรองรับ u_type/u_active แบบเดิมด้วย
 async function getAllUsers(req, res) {
   const q = String(req.query.q || "").trim();
 
-  // ✅ [เพิ่ม] alias: type/active (fallback ไปหา u_type/u_active)
   const type      = String(req.query.type || req.query.u_type || "").trim();
   const activeRaw = req.query.active !== undefined ? req.query.active : req.query.u_active;
   const active    = activeRaw === undefined ? null : Number(activeRaw);
 
-  // ✅ [เพิ่ม] validate type ถ้ามีส่งมา
   if (type && !["op", "ad", "ma"].includes(type)) {
     return res.status(400).json({ message: "type ต้องเป็น op, ad, ma เท่านั้น" });
   }
 
-  // ✅ [เพิ่ม] validate active ถ้ามีส่งมา
   if (active !== null && ![0, 1].includes(active)) {
     return res.status(400).json({ message: "active ต้องเป็น 0 หรือ 1 เท่านั้น" });
   }

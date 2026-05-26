@@ -5,7 +5,6 @@ const { requireAuth, requireRole, requireClientType } = require("../middleware/a
 const opScanController      = require("../controllers/op_scan.controller");
 const opScanQueryController = require("../controllers/op_scan_query.controller");
 
-// ✅ static routes ต้องอยู่ก่อน dynamic (:param) เสมอ
 router.get(
   "/op-scan/active",
   requireAuth, requireRole(["admin", "operator"]), requireClientType(["PC", "HH"]),
@@ -18,16 +17,14 @@ router.get(
   opScanQueryController.getActiveOpScanByTkId
 );
 
-// ✅ /op-scan/parked ต้องอยู่ก่อน /op-scan/:op_sc_id
-//    ถ้าสลับกัน Express จะ match "parked" เป็น :op_sc_id แทน
+
 router.get(
   "/op-scan/parked",
   requireAuth, requireRole(["admin", "operator"]), requireClientType(["PC", "HH"]),
   opScanQueryController.getParkedLots
 );
 
-// ✅ lookup-by-lot — ใช้ใน Start Scan (HH) สแกน lot_no แล้วหา tk_id
-//    ต้องอยู่ก่อน /op-scan/:op_sc_id เสมอ
+
 router.get(
   "/op-scans/lookup-by-lot/:lot_no",
   requireAuth, requireRole(["operator"]), requireClientType(["HH"]),
@@ -40,7 +37,6 @@ router.get(
   opScanQueryController.getTkSummary
 );
 
-// ✅ dynamic route อยู่ท้ายสุดของ GET
 router.get(
   "/op-scan/:op_sc_id",
   requireAuth, requireRole(["admin", "operator"]), requireClientType(["PC", "HH"]),

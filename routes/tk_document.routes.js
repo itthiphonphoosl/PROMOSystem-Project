@@ -24,7 +24,6 @@ router.get(
   listTkDocs
 );
 
-// ✅ by-lot — รับ lot_no ผ่าน query param ?lot_no=... (safe กว่า path param)
 router.get(
   "/TKDocs/by-lot",
   requireAuth,

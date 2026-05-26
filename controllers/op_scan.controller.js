@@ -1,8 +1,3 @@
-// controllers/op_scan.controller.js
-// ──────────────────────────────────────────
-// มีแค่ 2 function: startOpScan, finishOpScan
-// GET endpoints อยู่ใน op_scan_query.controller.js
-// ──────────────────────────────────────────
 const { getPool } = require("../config/db");
 
 const OP_SCAN_TABLE  = process.env.OP_SCAN_TABLE  || process.env.OPSCAN_TABLE || "dbo.op_scan";
@@ -12,7 +7,6 @@ const PART_TABLE     = process.env.PART_TABLE     || "dbo.part";
 const TRANSFER_TABLE = process.env.TRANSFER_TABLE || "dbo.t_transfer";
 const TKRUNLOG_TABLE = process.env.TKRUNLOG_TABLE || "dbo.TKRunLog";
 
-// MySQL: strip schema prefix (dbo.) and wrap in backticks
 function safeTableName(fullName) {
   const s = String(fullName || "").replace(/^[A-Za-z0-9_]+\./, "");
   if (!/^[A-Za-z0-9_]+$/.test(s)) throw new Error(`Invalid table name: ${s}`);
@@ -26,7 +20,6 @@ const SAFE_PART     = safeTableName(PART_TABLE);
 const SAFE_TRANSFER = safeTableName(TRANSFER_TABLE);
 const SAFE_RUNLOG   = safeTableName(TKRUNLOG_TABLE);
 
-// ── helpers ──────────────────────────────────────────────
 function pad(n, len) { return String(n).padStart(len, "0"); }
 
 function yymmdd(d) {
@@ -90,7 +83,6 @@ async function getPartByNo(conn, part_no) {
   return rows[0] ?? null;
 }
 
-// ดึง part_id จาก lot_no ใน TKRunLog
 async function getPartIdByLotNo(conn, tk_id, lot_no) {
   const [rows] = await conn.query(
     `SELECT part_id
@@ -124,7 +116,6 @@ async function genNewLot(conn, tk_id, part_id, actor_u_id) {
   };
 }
 
-// หา TK owner ของ lot จาก TKRunLog — รองรับ cross-TK
 async function getLotOwnerTk(conn, lot_no) {
   const [rows] = await conn.query(
     `SELECT tk_id
@@ -136,7 +127,6 @@ async function getLotOwnerTk(conn, lot_no) {
   return rows[0]?.tk_id ? String(rows[0].tk_id).trim() : null;
 }
 
-// ใช้ได้ทั้ง same-TK และ cross-TK
 async function unParkLot(conn, lot_no) {
   await conn.query(
     `UPDATE ${SAFE_TRANSFER}
@@ -177,7 +167,6 @@ async function insertTransfer(conn, {
   );
 }
 
-// Master-ID: rebuild lot โดยใช้ date เดิม + part ใหม่ + run เดิม
 function rebuildMasterLotNo(sourceLotNo, outPartNo, outPartName) {
   const lot = String(sourceLotNo || "").trim();
   const firstDash = lot.indexOf("-");
@@ -193,10 +182,6 @@ function rebuildMasterLotNo(sourceLotNo, outPartNo, outPartName) {
   return `${lotDate}-${String(outPartNo).trim()}-${String(outPartName).trim()}-${runNo}`;
 }
 
-// ══════════════════════════════════════════════════════════
-// START
-// POST /api/op-scans/start
-// ══════════════════════════════════════════════════════════
 exports.startOpScan = async (req, res) => {
   const actor = actorOf(req);
   const op_sta_id = actor.op_sta_id ? String(actor.op_sta_id).trim() : "";
@@ -222,7 +207,6 @@ exports.startOpScan = async (req, res) => {
     try {
       const now = new Date();
 
-      // ① TKHead status check
       const [headRows] = await conn.query(
         `SELECT tk_status, tk_active
          FROM \`TKHead\`
@@ -271,7 +255,6 @@ exports.startOpScan = async (req, res) => {
         });
       }
 
-      // ② TKDetail
       const [tkDetailRows] = await conn.query(
         `SELECT d.tk_id, d.part_id, p.part_no, p.part_name, d.lot_no,
                 d.tk_status, d.tk_created_at_ts
@@ -294,7 +277,6 @@ exports.startOpScan = async (req, res) => {
         });
       }
 
-      // ③ base lot (จาก TKRunLog)
       const [allLotRows] = await conn.query(
         `SELECT r.run_no, r.lot_no, p.part_no, p.part_name, r.created_at_ts
          FROM \`TKRunLog\` r
@@ -309,7 +291,6 @@ exports.startOpScan = async (req, res) => {
       const base_lot_no = baseLotRow?.lot_no ? String(baseLotRow.lot_no).trim() : null;
       const base_run_no = baseLotRow?.run_no ? String(baseLotRow.run_no).trim() : null;
 
-      // ③.b leaf lots
       const [tRows2] = await conn.query(
         `SELECT t.from_lot_no, t.to_lot_no, t.lot_parked_status
          FROM ${SAFE_TRANSFER} t
@@ -350,7 +331,6 @@ exports.startOpScan = async (req, res) => {
 
       const leafLotSet = [...new Set(leafLots)];
 
-      // ③.c parked lot check
       if (leafLotSet.length > 0) {
         const [parkedCheckRows] = await conn.query(
           `SELECT to_lot_no, op_sta_id
@@ -376,7 +356,7 @@ exports.startOpScan = async (req, res) => {
         }
       }
 
-      // ④ กัน STA007 finished
+      //กัน STA007 finished
       const [finishedRows] = await conn.query(
         `SELECT op_sc_id
          FROM ${SAFE_OPSCAN}
@@ -396,7 +376,7 @@ exports.startOpScan = async (req, res) => {
         });
       }
 
-      // ⑤ กัน station ย้อน
+      // กัน station ย้อน
       const [lastFinRows] = await conn.query(
         `SELECT s.op_sta_id, st.op_sta_name
          FROM ${SAFE_OPSCAN} s
@@ -441,7 +421,6 @@ exports.startOpScan = async (req, res) => {
         }
       }
 
-      // ⑥ validate machine
       const [mcRows] = await conn.query(
         `SELECT MC_id, MC_name, op_sta_id
          FROM ${SAFE_MACHINE}
@@ -470,7 +449,6 @@ exports.startOpScan = async (req, res) => {
         });
       }
 
-      // ⑦ active scan
       const [activeRows] = await conn.query(
         `SELECT s.op_sc_id, s.op_sta_id, st.op_sta_name, s.u_id,
                 u.u_firstname, u.u_lastname
@@ -525,7 +503,6 @@ exports.startOpScan = async (req, res) => {
         });
       }
 
-      // ⑧ gen op_sc_id + insert
       const op_sc_id = await genOpScId(conn, now);
 
       await conn.query(
@@ -537,7 +514,6 @@ exports.startOpScan = async (req, res) => {
         [op_sc_id, tk_id, op_sta_id, MC_id, Number(actor.u_id), tkDoc.lot_no || null, now]
       );
 
-      // ⑨ update TKDetail + TKHead status = 3
       await conn.query(
         `UPDATE ${SAFE_TKDETAIL}
          SET MC_id = ?, op_sta_id = ?, op_sc_id = ?
@@ -616,10 +592,6 @@ exports.startOpScan = async (req, res) => {
   }
 };
 
-// ══════════════════════════════════════════════════════════
-// FINISH
-// POST /api/op-scans/finish
-// ══════════════════════════════════════════════════════════
 exports.finishOpScan = async (req, res) => {
   const actor = actorOf(req);
 
@@ -647,7 +619,6 @@ exports.finishOpScan = async (req, res) => {
     return res.status(400).json({ message: "groups[] is required", actor });
   }
 
-  // validate groups
   for (let i = 0; i < groups.length; i++) {
     const g = groups[i];
     const tf = Number(g.tf_rs_code);
@@ -697,7 +668,6 @@ exports.finishOpScan = async (req, res) => {
     });
   }
 
-  // ✅ บังคับต้องมี split อย่างน้อย 1 รายการ
   if (!Array.isArray(g.splits) || g.splits.length === 0) {
     return res.status(400).json({
       message: `Group ${num}: ท่านยังไม่ได้เลือกการ Split`,
@@ -764,7 +734,6 @@ exports.finishOpScan = async (req, res) => {
     }
   }
 
-  // กัน from_lot_no ซ้ำข้ามกลุ่ม (เฉพาะที่ส่งมาจาก request)
   const allFromLots = new Set();
   for (const g of groups) {
     const tf = Number(g.tf_rs_code);
@@ -808,7 +777,6 @@ exports.finishOpScan = async (req, res) => {
     try {
       const now = new Date();
 
-      // ① lock op_scan row
       const [scanRows] = await conn.query(
         `SELECT *
          FROM ${SAFE_OPSCAN}
@@ -837,7 +805,6 @@ exports.finishOpScan = async (req, res) => {
         });
       }
 
-      // ② station lock
       const actorSta = actor.op_sta_id ? String(actor.op_sta_id).trim() : "";
       if (!actorSta) {
         await conn.rollback(); conn.release();
@@ -857,7 +824,6 @@ exports.finishOpScan = async (req, res) => {
         });
       }
 
-      // เริ่มที่ใครต้องเสร็จที่คนนั้น
       if (Number(row.u_id) !== Number(actor.u_id)) {
         const [ownerRows] = await conn.query(
           `SELECT u_firstname, u_lastname
@@ -882,7 +848,6 @@ exports.finishOpScan = async (req, res) => {
 
       const master_tk_id = String(row.tk_id || "").trim();
 
-      // ③ TKHead ต้องไม่ FINISHED
       const [headRows] = await conn.query(
         `SELECT tk_status, tk_active
          FROM \`TKHead\`
@@ -910,7 +875,6 @@ exports.finishOpScan = async (req, res) => {
         });
       }
 
-      // ④ base lot
       const [baseDetailRows] = await conn.query(
         `SELECT lot_no, part_id
          FROM ${SAFE_TKDETAIL}
@@ -923,7 +887,6 @@ exports.finishOpScan = async (req, res) => {
       const baseDetail = baseDetailRows[0];
       const base_lot_no = baseDetail?.lot_no ? String(baseDetail.lot_no).trim() : null;
       const base_part_id = baseDetail?.part_id ?? null;
-// ⑤ validate from_lot_no + parked lot station check
 {
   const fromLotChecks = [];
   for (const g of groups) {
@@ -954,8 +917,7 @@ exports.finishOpScan = async (req, res) => {
   for (const { lot, gLabel, tf } of fromLotChecks) {
     let lotOwnerTk = await getLotOwnerTk(conn, lot);
 
-    // ✅ Co-ID: อนุญาตให้ใช้ parked lot ต่อได้ แม้ lot นี้จะไม่อยู่ใน TKRunLog
-    // ขอแค่มีอยู่จริงใน t_transfer
+
     if (!lotOwnerTk && tf === 3) {
       const [tfRows] = await conn.query(
         `SELECT from_tk_id, to_tk_id
@@ -997,7 +959,6 @@ exports.finishOpScan = async (req, res) => {
     const isParked = pRow?.lot_parked_status === true || pRow?.lot_parked_status === 1;
 
     if (isParked) {
-      // tf=1 / tf=2 ยังห้ามใช้ parked lot เหมือนเดิม
       if (tf === 1 || tf === 2) {
         await conn.rollback(); conn.release();
         return res.status(400).json({
@@ -1008,7 +969,6 @@ exports.finishOpScan = async (req, res) => {
         });
       }
 
-      // tf=3 ใช้ parked lot ได้ แต่ต้องเป็น station เดียวกัน
       const parkedSta = pRow?.op_sta_id ? String(pRow.op_sta_id).trim() : "";
       if (parkedSta && parkedSta !== actorSta) {
         await conn.rollback(); conn.release();
@@ -1023,7 +983,6 @@ exports.finishOpScan = async (req, res) => {
     }
   }
 }
-      // ⑥ process groups
       const created_children = [];
       let first_lot_no = null;
       const MC_id_val = row.MC_id ? String(row.MC_id).trim() : null;
@@ -1034,7 +993,7 @@ exports.finishOpScan = async (req, res) => {
         const group_qty = Math.trunc(Number(g.qty));
         const gNum = i + 1;
 
-        // ── tf=1 Master-ID ────────────────────────────
+        //  tf=1 MasterID
 if (tf === 1) {
   const outPart = await getPartByNo(conn, String(g.out_part_no).trim());
   if (!outPart) {
@@ -1057,7 +1016,6 @@ if (tf === 1) {
     });
   }
 
-  // lot ใหม่ = วันเดิม + part ใหม่ + part name ใหม่ + run เดิม
   const to_lot = rebuildMasterLotNo(
     from_lot,
     outPart.part_no,
@@ -1068,10 +1026,8 @@ if (tf === 1) {
 
   const fromOwnerTk_1 = (await getLotOwnerTk(conn, from_lot)) || master_tk_id;
 
-  // ถ้า lot นี้เคยถูก park ให้ปลด park ก่อน
   await unParkLot(conn, from_lot);
 
-  // current ของเอกสาร = part ใหม่ + lot ใหม่
   await conn.query(
     `UPDATE ${SAFE_TKDETAIL}
      SET part_id = ?, lot_no = ?
@@ -1079,9 +1035,6 @@ if (tf === 1) {
     [Number(outPart.part_id), to_lot, master_tk_id]
   );
 
-  // สำคัญ:
-  // อย่า update part_id ของ TKRunLog row เดิม
-  // เพื่อให้ base part / part แรกของเอกสารยังคงเดิมสำหรับ Summary
   await conn.query(
     `UPDATE ${SAFE_RUNLOG}
      SET lot_no = ?
@@ -1124,8 +1077,8 @@ if (tf === 1) {
   });
 }
 
-       // ── tf=2 Split-ID ──────────────────────────────
-// ── tf=2 Split-ID ──────────────────────────────
+  
+//tf=2 SplitID
 if (tf === 2) {
   const from_lot = String(g.from_lot_no).trim();
   const splits = Array.isArray(g.splits) ? g.splits : [];
@@ -1140,7 +1093,6 @@ if (tf === 2) {
   const splitLots = [];
   const parkedLots = [];
 
-  // run เดิมของ source lot
   const [srcRunRows] = await conn.query(
     `SELECT run_no
      FROM \`TKRunLog\`
@@ -1160,8 +1112,6 @@ if (tf === 2) {
     });
   }
 
-  // ✅ part ปัจจุบันของ source lot ที่กำลังแตก
-  // ใช้จาก lot string + part table โดยตรง จะไม่หลุดกลับไป part แม่
   const sourceLastDash = from_lot.lastIndexOf("-");
   const sourceFirstDash = from_lot.indexOf("-");
   const sourceMiddle =
@@ -1189,7 +1139,6 @@ if (tf === 2) {
     }
   }
 
-  // fallback กันพลาด
   if (!sourcePartId) {
     const [srcDetailRows] = await conn.query(
       `SELECT d.part_id, p.part_no, p.part_name
@@ -1222,7 +1171,6 @@ if (tf === 2) {
     let lot_no;
 
     if (si === 0) {
-      // ✅ split ตัวแรก = rename source lot ตาม part ที่เลือกตัวแรก
       run_no = sourceRunNo;
       lot_no = rebuildMasterLotNo(
         from_lot,
@@ -1278,7 +1226,6 @@ if (tf === 2) {
   }
 
   if (parkedQty > 0) {
-    // ✅ lot พักต้องคงตาม source lot ล่าสุดที่กำลังแตก
     if (!sourcePartId) {
       await conn.rollback(); conn.release();
       return res.status(400).json({
@@ -1342,7 +1289,7 @@ if (tf === 2) {
     parked_lots: parkedLots,
   });
 }
-        // ── tf=3 Co-ID ─────────────────────────────────
+        //tf=3 CoID 
         if (tf === 3) {
           const outPart = await getPartByNo(conn, String(g.out_part_no).trim());
           if (!outPart) {
@@ -1463,7 +1410,6 @@ if (tf === 2) {
         }
       }
 
-      // ⑦.pre — mark unused leaf lots as parked
       {
         const usedFromLots = new Set();
         for (const g of groups) {
@@ -1487,10 +1433,7 @@ if (tf === 2) {
             for (const m of g.merge_lots) {
               usedFromLots.add(String(m.from_lot_no).trim());
             }
-            // ✅ fix: parked_from_lots ที่ถูกใช้ใน Co-ID ต้องนับว่า "used" ด้วย
-            // ไม่งั้น unParkLot() จะเปลี่ยน row เดิมเป็น parked_status=0
-            // แล้ว ⑦.pre จะเห็นว่าเป็น leaf ที่ยังไม่ถูกใช้ → insert self-park row ซ้ำ
-            // → summary แสดง "ไม่ได้ใช้" สีแดงผิดพลาด
+        
             if (Array.isArray(g.parked_from_lots)) {
               for (const pl of g.parked_from_lots) {
                 const pLot = pl?.from_lot_no ? String(pl.from_lot_no).trim() : null;
@@ -1563,7 +1506,6 @@ if (tf === 2) {
           }
         }
 
-        // base lot: ถ้าไม่ถูกใช้ ให้ park เฉพาะกรณีที่ยังไม่เคยมี row ใน transfer
         {
           const [baseRows] = await conn.query(
             `SELECT r.lot_no, r.part_id
@@ -1608,7 +1550,6 @@ if (tf === 2) {
           }
         }
 
-        // cross-TK parked lots not selected
         const crossTkLots = req.body.cross_tk_unselected_lots;
         if (Array.isArray(crossTkLots) && crossTkLots.length > 0) {
           for (const lotNo of crossTkLots) {
@@ -1626,7 +1567,6 @@ if (tf === 2) {
         }
       }
 
-      // ⑧ update op_scan finish
       await conn.query(
         `UPDATE ${SAFE_OPSCAN}
          SET op_sc_total_qty = ?,
@@ -1649,7 +1589,6 @@ if (tf === 2) {
         ]
       );
 
-      // ⑨ update TKHead/TKDetail status
       const isFinishAtSTA007 = actorSta === "STA007";
       const newTkStatus = isFinishAtSTA007 ? 1 : 2;
 

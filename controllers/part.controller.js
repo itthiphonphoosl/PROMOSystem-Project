@@ -1,4 +1,3 @@
-// controllers/part.controller.js
 const { getPool } = require("../config/db");
 
 const PART_TABLE = process.env.PART_TABLE || "dbo.part";
@@ -11,7 +10,6 @@ function safeTableName(fullName) {
 
 const SAFE_PART = safeTableName(PART_TABLE);
 
-// GET /api/parts
 exports.listParts = async (req, res) => {
   try {
     const pool    = getPool();
@@ -46,7 +44,6 @@ exports.listParts = async (req, res) => {
   }
 };
 
-// GET /api/parts/:part_id
 exports.getPartById = async (req, res) => {
   const part_id = Number(req.params.part_id);
   if (!Number.isFinite(part_id) || part_id <= 0) {
@@ -72,7 +69,6 @@ exports.getPartById = async (req, res) => {
   }
 };
 
-// PUT /api/parts/:part_id
 exports.updatePart = async (req, res) => {
   const part_id = Number(req.params.part_id);
   if (!Number.isFinite(part_id) || part_id <= 0) {
@@ -117,7 +113,7 @@ exports.updatePart = async (req, res) => {
     return res.status(500).json({ message: "Update part failed", error: err.message });
   }
 };
-// POST /api/parts
+
 exports.createPart = async (req, res) => {
   const { part_no, part_name, part_status } = req.body ?? {};
 
@@ -136,7 +132,6 @@ exports.createPart = async (req, res) => {
   try {
     const pool = getPool();
 
-    // ตรวจ duplicate part_no
     const [dup] = await pool.query(
       `SELECT part_id FROM ${SAFE_PART} WHERE part_no = ? LIMIT 1`,
       [String(part_no).trim()]

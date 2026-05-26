@@ -1,13 +1,10 @@
-// controllers/user.controller.js
 const bcrypt = require("bcryptjs");
 const { getPool } = require("../config/db");
 
-// GET /api/user
 async function getCurrentUser(req, res) {
   return res.json({ user: req.user });
 }
 
-// GET /api/users
 async function listUsers(req, res) {
   const page     = Math.max(1, Number(req.query.page  || 1));
   const limit    = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
@@ -65,7 +62,6 @@ async function listUsers(req, res) {
   }
 }
 
-// GET /api/users/:id
 async function getUserById(req, res) {
   const id = Number(req.params.id);
   if (!Number.isFinite(id) || id <= 0) {
@@ -109,7 +105,6 @@ async function hashOrPlainPassword(password) {
   return bcrypt.hash(String(password), 10);
 }
 
-// PUT /api/users/:id
 async function updateUser(req, res) {
   if (!assertAdmin(req, res)) return;
 
@@ -149,7 +144,6 @@ async function updateUser(req, res) {
     await conn.beginTransaction();
 
     try {
-      // 1) เช็ค user มีจริง + ดึง u_type ของ target
       const [existRows] = await conn.query(
         `SELECT u_id, u_type FROM \`user\` WHERE u_id = ? LIMIT 1`,
         [id]
@@ -160,14 +154,12 @@ async function updateUser(req, res) {
         return res.status(404).json({ message: "User not found" });
       }
 
-      // 2) Operator ไม่รองรับการตั้ง password
       if (u_password !== undefined && existRows[0].u_type === "op") {
         await conn.rollback();
         conn.release();
         return res.status(400).json({ message: "Operator ไม่รองรับการตั้ง password" });
       }
 
-      // 2) ถ้าแก้ username ต้องกันซ้ำ
       if (u_username !== undefined) {
         const [dupRows] = await conn.query(
           `SELECT u_id FROM \`user\` WHERE u_username = ? AND u_id <> ? LIMIT 1`,

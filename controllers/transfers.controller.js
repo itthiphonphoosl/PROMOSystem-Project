@@ -1,4 +1,3 @@
-// controllers/transfers.controller.js
 const { getPool } = require("../config/db");
 
 const TRANSFER_TABLE = process.env.TRANSFER_TABLE || "dbo.t_transfer";
@@ -21,7 +20,6 @@ function actorOf(req) {
   };
 }
 
-// GET /api/transfers?tk_id=TKxxxx&limit=200
 exports.listTransfers = async (req, res) => {
   const actor = actorOf(req);
 
@@ -65,7 +63,6 @@ exports.listTransfers = async (req, res) => {
   }
 };
 
-// GET /api/transfers/:transfer_id
 exports.getTransferById = async (req, res) => {
   const actor = actorOf(req);
 

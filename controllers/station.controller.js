@@ -1,11 +1,9 @@
-// controllers/station.controller.js
 const { getPool } = require("../config/db");
 
 function isValidStationId(id) {
   return /^STA\d+$/i.test(String(id || "").trim());
 }
 
-// GET /api/stations
 async function listStations(req, res) {
   try {
     const pool = getPool();
@@ -24,7 +22,6 @@ async function listStations(req, res) {
   }
 }
 
-// GET /api/stations/:id
 async function getStationById(req, res) {
   const id = String(req.params.id || "").trim();
   if (!isValidStationId(id)) return res.status(400).json({ message: "Invalid station id" });
@@ -51,7 +48,6 @@ async function getStationById(req, res) {
   }
 }
 
-// PUT /api/stations/:id
 async function updateStation(req, res) {
   const op_sta_id = String(req.params.id || "").trim();
   if (!isValidStationId(op_sta_id)) return res.status(400).json({ message: "Invalid station id" });
@@ -117,7 +113,6 @@ async function updateStation(req, res) {
   }
 }
 
-// GET /api/stations/public  — ไม่ต้อง auth (ใช้สำหรับ login dropdown)
 async function listPublicStations(req, res) {
   try {
     const pool = getPool();

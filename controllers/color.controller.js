@@ -1,4 +1,3 @@
-// controllers/color.controller.js
 const { getPool } = require("../config/db");
 
 const COLOR_TABLE = process.env.COLOR_TABLE || "dbo.color_painting";
@@ -13,14 +12,13 @@ const SAFE_COLOR = safeTableName(COLOR_TABLE);
 
 function actorOf(req) {
   return {
-    u_id:   req.user?.u_id   ?? null,
+    u_id:        req.user?.u_id        ?? null,
     u_firstname: req.user?.u_firstname ?? "",
     u_lastname:  req.user?.u_lastname  ?? "",
-    role:   req.user?.role   ?? "unknown",
+    role:        req.user?.role        ?? "unknown",
   };
 }
 
-// GET /api/colors
 exports.listColors = async (req, res) => {
   const actor   = actorOf(req);
   const showAll = req.query.all === "true";
@@ -42,7 +40,6 @@ exports.listColors = async (req, res) => {
   }
 };
 
-// GET /api/colors/:color_id
 exports.getColorById = async (req, res) => {
   const actor    = actorOf(req);
   const color_id = Number(req.params.color_id);
@@ -72,7 +69,6 @@ exports.getColorById = async (req, res) => {
   }
 };
 
-// PUT /api/colors/:color_id
 exports.updateColor = async (req, res) => {
   const actor    = actorOf(req);
   const color_id = Number(req.params.color_id);
@@ -136,7 +132,7 @@ exports.updateColor = async (req, res) => {
     return res.status(500).json({ message: "Update color failed", actor, error: err.message });
   }
 };
-// POST /api/colors
+
 exports.createColor = async (req, res) => {
   const actor = actorOf(req);
   const { color_no, color_name, color_status } = req.body ?? {};
@@ -156,7 +152,6 @@ exports.createColor = async (req, res) => {
   try {
     const pool = getPool();
 
-    // ตรวจ duplicate color_no
     const [dup] = await pool.query(
       `SELECT color_id FROM ${SAFE_COLOR} WHERE color_no = ? LIMIT 1`,
       [String(color_no).trim()]

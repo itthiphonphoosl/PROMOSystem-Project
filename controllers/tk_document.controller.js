@@ -1,4 +1,3 @@
-// controllers/tk_document.controller.js
 const { getPool } = require("../config/db");
 
 const TKHEAD_TABLE   = process.env.TKHEAD_TABLE   || "dbo.TKHead";
@@ -25,9 +24,6 @@ const SAFE_TKHEAD   = safeTableName(TKHEAD_TABLE);
 const SAFE_TKDETAIL = safeTableName(TKDETAIL_TABLE);
 const SAFE_TRANSFER = safeTableName(TRANSFER_TABLE);
 
-// ---------------------------------------------------------------------------
-// gen tk_id: TK + YYMMDD + ####
-// ---------------------------------------------------------------------------
 async function genTkId(conn, docDate) {
   const prefix = `TK${yymmdd(docDate)}`;
   const [rows] = await conn.query(
@@ -45,17 +41,6 @@ async function genTkId(conn, docDate) {
   return `${prefix}${pad(running, 4)}`;
 }
 
-// ---------------------------------------------------------------------------
-// assertEditable(pool, tk_id)
-//
-// Guard สำหรับ PUT (part_no / tk_active) และ DELETE
-// เงื่อนไขที่ผ่านได้:
-//   1. TKDetail.MC_id IS NULL AND TKDetail.op_sta_id IS NULL  (ยังไม่ start)
-//   2. ไม่มี Transfer record เลย (COUNT = 0)
-//
-// หมายเหตุ: tk_active = 0 ไม่ได้ block การแก้ไข
-//           admin ยังต้อง toggle กลับได้เสมอ
-// ---------------------------------------------------------------------------
 async function assertEditable(pool, tk_id) {
   const [detailRows] = await pool.query(
     `SELECT MC_id, op_sta_id FROM ${SAFE_TKDETAIL} WHERE tk_id = ? LIMIT 1`,
@@ -90,9 +75,6 @@ async function assertEditable(pool, tk_id) {
   return { ok: true };
 }
 
-// ---------------------------------------------------------------------------
-// POST /api/TKDocs
-// ---------------------------------------------------------------------------
 exports.createTkDoc = async (req, res) => {
   const actor = actorOf(req);
   if (actor.role !== "admin") {
@@ -122,7 +104,6 @@ exports.createTkDoc = async (req, res) => {
       const now   = new Date();
       const tk_id = await genTkId(conn, now);
 
-      // tk_active = 1 (default เปิดใช้งานทันที)
       await conn.query(
         `INSERT INTO ${SAFE_TKHEAD} (tk_id, tk_created_at_ts, created_by_u_id, tk_status, tk_active)
          VALUES (?, ?, ?, ?, ?)`,
@@ -182,9 +163,6 @@ exports.createTkDoc = async (req, res) => {
 
 exports.createTkDocument = exports.createTkDoc;
 
-// ---------------------------------------------------------------------------
-// GET /api/TKDocs
-// ---------------------------------------------------------------------------
 exports.listTkDocs = async (req, res) => {
   const actor = actorOf(req);
 
@@ -221,12 +199,6 @@ exports.listTkDocs = async (req, res) => {
   }
 };
 
-// ---------------------------------------------------------------------------
-// GET /api/TKDocs/:id
-//
-// - admin    : เห็นได้เสมอ ไม่ว่า tk_active จะเป็นอะไร
-// - operator : ถ้า tk_active = 0 → 403
-// ---------------------------------------------------------------------------
 exports.getTkDocById = async (req, res) => {
   const actor = actorOf(req);
   const id    = String(req.params.id || "").trim();
@@ -243,7 +215,6 @@ exports.getTkDocById = async (req, res) => {
     const head = headRows[0];
     if (!head) return res.status(404).json({ message: "Not found", id, actor });
 
-    // block operator ถ้าเอกสารถูกปิด
     if (Number(head.tk_active) !== 1 && actor.role !== "admin") {
       return res.status(403).json({
         message:   "เอกสารนี้ถูกปิดใช้งานอยู่ กรุณาติดต่อ Admin",
@@ -316,19 +287,6 @@ exports.getTkDocById = async (req, res) => {
   }
 };
 
-// ---------------------------------------------------------------------------
-// PUT /api/TKDocs/:id  (admin only)
-//
-// Fields ที่แก้ได้:
-//   - part_no   -> ลบ TKRunLog เดิม + Call SP ใหม่ + UPDATE TKDetail
-//   - tk_active -> เปิด(1)/ปิด(0) เอกสาร → UPDATE TKHead.tk_active
-//
-// Guard (assertEditable) — ต้องผ่านทั้งคู่:
-//   1. TKDetail.MC_id IS NULL AND TKDetail.op_sta_id IS NULL  (ยังไม่ start)
-//   2. ไม่มี Transfer record เลย (COUNT = 0)
-//
-// หมายเหตุ: tk_status ไม่อยู่ในนี้ มันเอาไว้ track progress ของระบบเอง
-// ---------------------------------------------------------------------------
 exports.updateTkDoc = async (req, res) => {
   const actor = actorOf(req);
   const tk_id = String(req.params.id || "").trim();
@@ -356,7 +314,6 @@ exports.updateTkDoc = async (req, res) => {
   try {
     const pool = getPool();
 
-    // 1) ตรวจ TKHead มีอยู่จริง
     const [headRows] = await pool.query(
       `SELECT tk_id, tk_status, tk_active FROM ${SAFE_TKHEAD} WHERE tk_id = ? LIMIT 1`,
       [tk_id]
@@ -365,7 +322,6 @@ exports.updateTkDoc = async (req, res) => {
       return res.status(404).json({ message: "Tracking No. นี้ไม่พบในระบบ", tk_id, actor });
     }
 
-    // 2) Guard
     const guard = await assertEditable(pool, tk_id);
     if (!guard.ok) {
       return res.status(409).json({ message: guard.reason, detail: guard.detail, actor });
@@ -377,7 +333,6 @@ exports.updateTkDoc = async (req, res) => {
     try {
       const changed = {};
 
-      // --- toggle tk_active ---
       if (tk_active !== undefined) {
         await conn.query(
           `UPDATE ${SAFE_TKHEAD} SET tk_active = ? WHERE tk_id = ?`,
@@ -386,7 +341,6 @@ exports.updateTkDoc = async (req, res) => {
         changed.tk_active = tk_active;
       }
 
-      // --- เปลี่ยน part_no ---
       let partResult = null;
       if (part_no !== undefined) {
         const [partRows] = await conn.query(
@@ -400,10 +354,8 @@ exports.updateTkDoc = async (req, res) => {
           return res.status(400).json({ message: `part_no not found: ${part_no}`, actor });
         }
 
-        // ลบ TKRunLog เดิม (run_no/lot_no ผูกกับ part เดิม ใช้ต่อไม่ได้)
         await conn.query(`DELETE FROM \`TKRunLog\` WHERE tk_id = ?`, [tk_id]);
 
-        // Call SP ใหม่สำหรับ part ใหม่
         await conn.query(
           `CALL usp_TKRunLog_Create(?, ?, ?, @run_no, @lot_no)`,
           [tk_id, Number(partRow.part_id), Number(actor.u_id)]
@@ -461,15 +413,6 @@ exports.updateTkDoc = async (req, res) => {
   }
 };
 
-// ---------------------------------------------------------------------------
-// DELETE /api/TKDocs/:id  (admin only)
-//
-// Rules:
-//   - tk_status != 0           → 409 ไม่สามารถลบ/ยกเลิกได้
-//   - tk_status == 0 + เป็น tk_id ล่าสุด → Hard Delete (ลบออกจาก DB จริง)
-//   - tk_status == 0 + ไม่ใช่ล่าสุด      → Soft Cancel (tk_status = 4)
-//     (เพื่อไม่ให้ running number เคลื่อน)
-// ---------------------------------------------------------------------------
 exports.deleteTkDoc = async (req, res) => {
   const actor = actorOf(req);
   const tk_id = String(req.params.id || "").trim();
@@ -484,7 +427,6 @@ exports.deleteTkDoc = async (req, res) => {
   try {
     const pool = getPool();
 
-    // 1) ดึง TKHead
     const [headRows] = await pool.query(
       `SELECT tk_id, tk_status, tk_active FROM ${SAFE_TKHEAD} WHERE tk_id = ? LIMIT 1`,
       [tk_id]
@@ -494,7 +436,6 @@ exports.deleteTkDoc = async (req, res) => {
       return res.status(404).json({ message: "Tracking No. นี้ไม่พบในระบบ", tk_id, actor });
     }
 
-    // 2) tk_status != 0 → block ทันที (1=กำลังดำเนินการ, 2=ผ่านบางสถานี, 3=เสร็จสิ้น)
     if (Number(head.tk_status) !== 0) {
       return res.status(409).json({
         message: `ไม่สามารถลบ/ยกเลิกได้ เอกสารนี้มี tk_status = ${head.tk_status} (ดำเนินการไปแล้ว)`,
@@ -504,13 +445,11 @@ exports.deleteTkDoc = async (req, res) => {
       });
     }
 
-    // 3) เช็คว่าเป็น tk_id ล่าสุดในระบบหรือไม่
     const [[{ latest_tk_id }]] = await pool.query(
       `SELECT tk_id AS latest_tk_id FROM ${SAFE_TKHEAD} ORDER BY tk_id DESC LIMIT 1`
     );
     const isLatest = (tk_id === latest_tk_id);
 
-    // 4) ดึง detail + runlog เพื่อใส่ใน response
     const [detailRows] = await pool.query(
       `SELECT d.part_id, p.part_no, p.part_name, d.lot_no
        FROM ${SAFE_TKDETAIL} d
@@ -531,7 +470,6 @@ exports.deleteTkDoc = async (req, res) => {
 
     try {
       if (isLatest) {
-        // ── Hard Delete: ลบออกจาก DB จริง ──
         await conn.query(`DELETE FROM ${SAFE_TKDETAIL} WHERE tk_id = ?`, [tk_id]);
         await conn.query(`DELETE FROM \`TKRunLog\`     WHERE tk_id = ?`, [tk_id]);
         await conn.query(`DELETE FROM ${SAFE_TKHEAD}   WHERE tk_id = ?`, [tk_id]);
@@ -553,7 +491,6 @@ exports.deleteTkDoc = async (req, res) => {
         });
 
       } else {
-        // ── Soft Cancel: เปลี่ยน tk_status = 4 ──
         await conn.query(
           `UPDATE ${SAFE_TKHEAD} SET tk_status = 4 WHERE tk_id = ?`,
           [tk_id]
@@ -586,10 +523,6 @@ exports.deleteTkDoc = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────────────────────────────
-// GET /api/TKDocs/by-lot/:lot_no
-// รับ lot_no → return tk_id
-// ─────────────────────────────────────────────────────────
 exports.getTkIdByLotNo = async (req, res) => {
   const actor  = actorOf(req);
   const lot_no = String(req.params.lot_no || req.query.lot_no || "").trim();
